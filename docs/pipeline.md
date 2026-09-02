@@ -7,6 +7,7 @@ Full paper (description, flowchart, references, attributions):
 Default WebGPU scene: `splats/model.splat` (compact 32-byte SH0). Serve from the **repo root**.
 
 ```bash
+./setup.sh                            # once per machine
 python3 -m http.server 8090 --bind 127.0.0.1
 ./semantic_sidecar/launch.sh          # 127.0.0.1:8766, reads XAI_API_KEY
 ./gaussian_splatting_webgpu/launch-webgpu-chrome.sh

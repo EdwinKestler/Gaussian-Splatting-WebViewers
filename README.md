@@ -4,6 +4,20 @@ Experimental browser viewers for [3D Gaussian Splatting for Real-Time Radiance F
 
 The original Three.js and A-Frame demos are still here. A new **WebGPU 3DGS viewer** uses [GaussForge](https://github.com/3dgscloud/GaussForge) to decode PLY / SPLAT / SPZ / KSPLAT / SOG, then sorts and rasterizes on the GPU. GaussForge is vendored under `vendor/gaussforge/` (Apache-2.0, single-file WASM build), so the viewer decodes every format without network access; the jsDelivr copy is only a fallback.
 
+On a new machine:
+
+```bash
+git clone https://github.com/EdwinKestler/Gaussian-Splatting-WebViewers.git
+cd Gaussian-Splatting-WebViewers
+./setup.sh                 # dirs, .env template, dependency checks
+./setup.sh --sidecar       # also install Pillow (Grok sidecar)
+./setup.sh --tests         # also npm install (Node ≥ 22)
+./setup.sh --e2e           # also Playwright Chromium
+./setup.sh --all           # sidecar + tests + e2e
+```
+
+`splats/` is gitignored — copy a `.splat` or trained `point_cloud.ply` into `splats/` (or drop a file in the viewer). `gaussian_splatting_webgpu/demo.ply` ships with the repo.
+
 Serve the repo from the **repository root** (the WebGPU worker imports `../shared/splat-io.js`, so `file://` and serving only the subfolder will fail):
 
 ```bash
