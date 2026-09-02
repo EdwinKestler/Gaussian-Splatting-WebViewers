@@ -4,6 +4,7 @@
 | --- | --- |
 | [open-vocab-3dgs-imagine-pipeline-paper.md](open-vocab-3dgs-imagine-pipeline-paper.md) | Technical report: pipeline, flowchart, references, third-party attributions |
 | [open-vocab-3dgs-imagine-pipeline-paper.pdf](open-vocab-3dgs-imagine-pipeline-paper.pdf) | Same report as PDF |
+| [plan-segmentacion-edicion-3dgs.md](plan-segmentacion-edicion-3dgs.md) | Plan: clustering, segmentación, clasificación, malla y edición de objetos sobre 3DGS (sin entrenamiento por escena) |
 | [pipeline.md](pipeline.md) | Short operator workflow |
 | [webgpu-chrome.md](webgpu-chrome.md) | Linux WebGPU Chrome / Vulkan launch |
 | [figures/pipeline-flowchart.png](figures/pipeline-flowchart.png) | Figure 1 |

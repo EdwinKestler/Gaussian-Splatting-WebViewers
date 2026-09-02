@@ -11,7 +11,7 @@ cd Gaussian-Splatting-WebViewers
 python3 -m http.server 8090 --bind 127.0.0.1
 ```
 
-Then open [http://127.0.0.1:8090/](http://127.0.0.1:8090/) or the WebGPU viewer at [http://127.0.0.1:8090/gaussian_splatting_webgpu/?url=../splats/model.splat](http://127.0.0.1:8090/gaussian_splatting_webgpu/?url=../splats/model.splat). Default scene is `splats/model.splat`. Pipeline notes: [docs/pipeline.md](docs/pipeline.md). Paper (flowchart, references, attributions): [docs/open-vocab-3dgs-imagine-pipeline-paper.md](docs/open-vocab-3dgs-imagine-pipeline-paper.md) · [PDF](docs/open-vocab-3dgs-imagine-pipeline-paper.pdf).
+Then open [http://127.0.0.1:8090/](http://127.0.0.1:8090/) or the WebGPU viewer at [http://127.0.0.1:8090/gaussian_splatting_webgpu/?url=../splats/model.splat](http://127.0.0.1:8090/gaussian_splatting_webgpu/?url=../splats/model.splat). Default scene is `splats/model.splat`. Pipeline notes: [docs/pipeline.md](docs/pipeline.md). Roadmap for per-Gaussian segmentation, classification, mesh and object editing: [docs/plan-segmentacion-edicion-3dgs.md](docs/plan-segmentacion-edicion-3dgs.md). Paper (flowchart, references, attributions): [docs/open-vocab-3dgs-imagine-pipeline-paper.md](docs/open-vocab-3dgs-imagine-pipeline-paper.md) · [PDF](docs/open-vocab-3dgs-imagine-pipeline-paper.pdf).
 
 ### WebGPU Chrome (Linux / Vulkan)
 
