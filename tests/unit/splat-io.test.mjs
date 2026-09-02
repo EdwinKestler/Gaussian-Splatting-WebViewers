@@ -1,5 +1,5 @@
 /**
- * Unit tests for shared/splat-io.js (run: node --test tests/unit/).
+ * Unit tests for shared/splat-io.js (run: npm test).
  * Only node:test + node:assert; fixtures are built in memory by tests/helpers/make-ply.mjs.
  */
 import { test, describe } from "node:test";
@@ -126,6 +126,15 @@ describe("detectFormat", () => {
   test("accepts typed arrays as input", () => {
     const buf = makeGaussianPly(SAMPLE_3DGS);
     assert.equal(detectFormat(new Uint8Array(buf)), "ply");
+  });
+
+  test("accepts a SharedArrayBuffer as input", () => {
+    const buf = makeGaussianPly(SAMPLE_3DGS);
+    const shared = new SharedArrayBuffer(buf.byteLength);
+    new Uint8Array(shared).set(new Uint8Array(buf));
+    assert.equal(detectFormat(shared), "ply");
+    assert.equal(toSplat32(shared, "s.ply").count, 2);
+    assert.equal(toGaussianCloud(shared, "s.ply").count, 2);
   });
 
   test("throws on unrecognised sizes", () => {
@@ -339,7 +348,8 @@ describe("2DGS PLY (scale_0, scale_1 only)", () => {
     assertNearRel(row.sx, 0.2, 1e-6);
     assertNearRel(row.sy, 0.05, 1e-6);
     assertNearRel(row.sz, 0.05 * THIN_DISK_RATIO, 1e-5);
-    assert.equal(row.rgba[3], Math.round(0.9 * 255));
+    // sigmoid(fround(logit(0.9))) * 255 sits on a .5 boundary: allow one byte of rounding
+    assertNear(row.rgba[3], 0.9 * 255, 1, "alpha byte");
   });
 
   test("2DGS without rot_* and without opacity still loads", () => {
@@ -349,6 +359,76 @@ describe("2DGS PLY (scale_0, scale_1 only)", () => {
     const g = gaussianAt(cloud, 0);
     assert.deepEqual([g.qw, g.qx, g.qy, g.qz], [1, 0, 0, 0]);
     assert.equal(g.opacity, 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// degenerate rows (non-finite log-scales from diverged gaussians)
+// ---------------------------------------------------------------------------
+
+describe("non-finite scale_* rows are hidden identically by both parsers", () => {
+  const names = gaussianPropertyNames();
+  const properties = names.map((name) => ({ name, type: "float" }));
+  const record = (over) => {
+    const v = {
+      x: 1, y: 2, z: 3, f_dc_0: 0.5, f_dc_1: 0.5, f_dc_2: 0.5, opacity: logit(0.95),
+      scale_0: Math.log(0.1), scale_1: Math.log(0.1), scale_2: Math.log(0.1),
+      rot_0: 1, rot_1: 0, rot_2: 0, rot_3: 0,
+      ...over,
+    };
+    return names.map((n) => v[n]);
+  };
+  const healthy = record({ x: 7, scale_0: Math.log(0.05), scale_1: Math.log(0.05), scale_2: Math.log(0.05) });
+
+  const cases = [
+    ["NaN log-scale", { scale_0: NaN }],
+    ["+Infinity log-scale", { scale_1: Infinity }],
+    ["log-scale that overflows float32 after exp", { scale_2: 100 }],
+  ];
+
+  for (const [label, over] of cases) {
+    for (const encoding of ["binary_le", "ascii"]) {
+      test(`${label} (${encoding}): scales 0, opacity 0, sorted last, sibling untouched`, () => {
+        // degenerate row first so the packed sort has to move it behind the healthy one
+        const buf = makePly({ properties, rows: [record(over), healthy], encoding });
+
+        const cloud = toGaussianCloud(buf, "diverged.ply");
+        assert.equal(cloud.count, 2);
+        const bad = gaussianAt(cloud, 0);
+        assert.deepEqual([bad.sx, bad.sy, bad.sz], [0, 0, 0], "float scales");
+        assert.equal(bad.opacity, 0, "float opacity");
+        assert.equal(bad.x, 1);
+        const good = gaussianAt(cloud, 1);
+        assertNearRel(good.sx, 0.05, 1e-6);
+        assertNear(good.opacity, 0.95, 1e-6);
+        for (const v of cloud.gaussians) assert.ok(Number.isFinite(v), "no NaN/Infinity in the float cloud");
+
+        const parsed = toSplat32(buf, "diverged.ply");
+        assert.equal(parsed.count, 2);
+        const first = packedRow(parsed.packed, 0);
+        assert.equal(first.x, 7, "healthy row sorts first");
+        assertNearRel(first.sx, 0.05, 1e-6);
+        assertNear(first.rgba[3], 0.95 * 255, 1);
+        const hidden = packedRow(parsed.packed, 1);
+        assert.equal(hidden.x, 1);
+        assert.deepEqual([hidden.sx, hidden.sy, hidden.sz], [0, 0, 0], "packed scales");
+        assert.equal(hidden.rgba[3], 0, "packed alpha byte");
+        assert.deepEqual(hidden.rgba.slice(0, 3), packedRow(parsed.packed, 0).rgba.slice(0, 3), "colour still decoded");
+      });
+    }
+  }
+
+  test("2DGS: a NaN in either disk axis hides the row", () => {
+    const twoNames = gaussianPropertyNames({ variant: "2dgs" });
+    const twoProps = twoNames.map((name) => ({ name, type: "float" }));
+    const row = twoNames.map((n) => ({
+      x: 0, y: 0, z: 0, f_dc_0: 0, f_dc_1: 0, f_dc_2: 0, opacity: 2,
+      scale_0: Math.log(0.2), scale_1: NaN, rot_0: 1, rot_1: 0, rot_2: 0, rot_3: 0,
+    }[n]));
+    const buf = makePly({ properties: twoProps, rows: [row] });
+    const g = gaussianAt(toGaussianCloud(buf), 0);
+    assert.deepEqual([g.sx, g.sy, g.sz, g.opacity], [0, 0, 0, 0]);
+    assert.equal(packedRow(toSplat32(buf).packed, 0).rgba[3], 0);
   });
 });
 

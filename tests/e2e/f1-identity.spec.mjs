@@ -24,6 +24,10 @@ const MIN_COVERAGE_PX = 200;
 const DEPTH_TOLERANCE = 0.01;
 /** Camera used for the two-sphere scene: on the +z axis looking at the origin. */
 const SPHERES_EYE = [0, 0, 4];
+/** Offscreen size whose readback rows are NOT 256-byte aligned (exercises row de-padding). */
+const UNALIGNED_SIZE = { width: 500, height: 300 };
+/** Real viewer page in headless mode: canvas never configured, ?scene=synthetic loads the two spheres. */
+const VIEWER_PAGE = "/gaussian_splatting_webgpu/index.html?offscreen=1&scene=synthetic";
 
 /** Forward browser console output to the test log. */
 function pipeConsole(page) {
@@ -185,7 +189,10 @@ test("two spheres: id readback and pick() return each sphere's label; hide/isola
   const mid = setup.width / 2;
   expect(ids.stats.byLabel[LABEL_A].xRange[1], "píxeles de A en la mitad derecha").toBeLessThan(mid);
   expect(ids.stats.byLabel[LABEL_B].xRange[0], "píxeles de B en la mitad izquierda").toBeGreaterThan(mid);
-  expect(pixelsOf(ids.stats, 0), "píxeles id con etiqueta 0 (fondo) en una escena totalmente etiquetada").toBe(0);
+  // Every non-zero id maps to one of the two spheres (no label-0 gaussians in this scene).
+  expect(ids.stats.nonZero, "todos los píxeles id deben pertenecer a la esfera A o B").toBe(
+    pixelsOf(ids.stats, LABEL_A) + pixelsOf(ids.stats, LABEL_B)
+  );
 
   // pick() outside both spheres hits nothing.
   const empty = await page.evaluate(() => window.__h.pick(0, 0));
@@ -347,7 +354,10 @@ test("normal readback: smallest-scale axis in view space, flipped to face the ca
 
 test("setInstance(2, { xform: translation }) moves sphere B's id pixels", async ({ page }, testInfo) => {
   await openHarness(page);
-  await initHarness(page, testInfo);
+  // 500 px rows are not multiples of 256 bytes in any readback format (id 2000 B,
+  // rgba8 2000 B, rgba16float 4000 B, rgba32float 8000 B), so this test also
+  // exercises the row de-padding of the readback decoder.
+  await initHarness(page, testInfo, UNALIGNED_SIZE);
   const setup = await loadTwoSpheres(page);
 
   const before = await readIds(page, setup);
@@ -418,4 +428,119 @@ test("setInstance(2, { xform: translation }) moves sphere B's id pixels", async 
   expect(pixelsOf(reset.stats, LABEL_B), "píxeles id de B tras restaurar la identidad").toBe(pixelsBefore);
 
   await expectHealthy(page);
+});
+
+// ------------------------------------------- (f) real click path in the viewer
+
+/** Current HUD selection text (#inst-status). */
+const hudStatus = (page) => page.evaluate(() => document.getElementById("inst-status").textContent);
+
+/**
+ * Click the viewer canvas at the CSS position where world point `p` projects and
+ * wait until the HUD text changes (pickAt() is async: it reads the ID pass back).
+ * Returns the click position plus the panel selection.
+ */
+async function clickWorldPoint(page, p) {
+  const target = await page.evaluate((p) => {
+    const px = window.__gsInstances.project(p);
+    if (!px) return null;
+    const rect = document.getElementById("gpu-canvas").getBoundingClientRect();
+    return { px, x: rect.left + px[0], y: rect.top + px[1], rect: [rect.left, rect.top, rect.width, rect.height] };
+  }, p);
+  expect(target, `el punto ${p} no se proyecta en el lienzo`).not.toBeNull();
+  const before = await hudStatus(page);
+  await page.mouse.click(target.x, target.y);
+  await page.waitForFunction(
+    (prev) => document.getElementById("inst-status").textContent !== prev,
+    before,
+    { timeout: 15_000 }
+  );
+  const state = await page.evaluate(() => ({
+    current: window.__gsInstances.current,
+    status: document.getElementById("inst-status").textContent,
+  }));
+  console.log(`[f1] clic en ${p} → CSS ${target.px.map((v) => v.toFixed(1))} · ${state.status}`);
+  return { ...target, ...state };
+}
+
+test("viewer: a mouse click on each sphere selects its instance and the HUD shows 'instancia n'", async ({ page }, testInfo) => {
+  await page.goto(VIEWER_PAGE);
+  await page.waitForFunction(
+    () => window.__gsViewer?.name === "synthetic-two-spheres" && !!window.__gsInstances,
+    null,
+    { timeout: 60_000 }
+  );
+  // The frame loop must have produced a camera (project() needs lastFrame) after camera.fit().
+  await page.waitForFunction(() => window.__gsInstances.project([-1, 0, 0]) !== null, null, { timeout: 15_000 });
+  const info = await page.evaluate(async () => {
+    const adapter = await navigator.gpu.requestAdapter();
+    const canvas = document.getElementById("gpu-canvas");
+    return {
+      vendor: adapter?.info?.vendor ?? "?",
+      architecture: adapter?.info?.architecture ?? "?",
+      dpr: window.devicePixelRatio,
+      css: [canvas.clientWidth, canvas.clientHeight],
+      device: [canvas.width, canvas.height],
+      rows: window.__gsInstances.list(),
+    };
+  });
+  testInfo.annotations.push({ type: "webgpu-adapter", description: `vendor=${info.vendor} architecture=${info.architecture}` });
+  console.log(`[f1] visor offscreen=1: lienzo CSS ${info.css} · dispositivo ${info.device} · dpr ${info.dpr} · instancias ${JSON.stringify(info.rows.map((r) => [r.label, r.name]))}`);
+  expect(info.rows.map((r) => r.label), "el panel debe registrar las instancias 1 y 2").toEqual([LABEL_A, LABEL_B]);
+  expect(await hudStatus(page), "estado inicial del HUD").toBe("Seleccionada: ninguna");
+
+  // Click on sphere A (centre at x = -1).
+  const a = await clickWorldPoint(page, [-1, 0, 0]);
+  expect(a.current, "el clic en A no seleccionó ninguna instancia").not.toBeNull();
+  expect(a.current.label, "instancia seleccionada al pulsar sobre A").toBe(LABEL_A);
+  expect(a.current.name, "nombre de la instancia A").toBe("esfera A");
+  expect(a.current.index, "gaussiana seleccionada en A").toBeGreaterThanOrEqual(0);
+  expect(a.status, "HUD tras el clic en A").toContain(`instancia ${LABEL_A}`);
+  expect(a.status, "HUD tras el clic en A").toMatch(/^Seleccionada: instancia 1 \(esfera A\) · gaussiana \d+$/);
+  await expect(page.locator("#inst-list .inst-row.selected"), "fila resaltada en el panel").toHaveAttribute("data-label", String(LABEL_A));
+
+  // Click on sphere B (centre at x = +1): the selection moves to instance 2.
+  const b = await clickWorldPoint(page, [1, 0, 0]);
+  expect(b.current?.label, "instancia seleccionada al pulsar sobre B").toBe(LABEL_B);
+  expect(b.current.name, "nombre de la instancia B").toBe("esfera B");
+  expect(b.status, "HUD tras el clic en B").toContain(`instancia ${LABEL_B}`);
+  await expect(page.locator("#inst-list .inst-row.selected"), "fila resaltada en el panel").toHaveAttribute("data-label", String(LABEL_B));
+
+  // The same click through the CSS-px API must agree with the DOM path.
+  const viaApi = await page.evaluate((px) => window.__gsInstances.pickAt(px[0], px[1]), b.px);
+  expect(viaApi?.label, "__gsInstances.pickAt() en el centro de B").toBe(LABEL_B);
+  expect(viaApi.index, "pickAt() y el clic deben dar la misma gaussiana (B)").toBe(b.current.index);
+
+  // H1: the panel buttons isolate and tint the selected instance.
+  const rowB = page.locator(`#inst-list .inst-row[data-label="${LABEL_B}"]`);
+  await rowB.locator('button[data-act="isolate"]').click();
+  await rowB.locator('button[data-act="tint"]').click();
+  const h1 = await page.evaluate((label) => {
+    const inst = window.__gsRenderer.getInstance(label);
+    return { isolateLabel: window.__gsInstances.isolateLabel, tint: Array.from(inst.tint), rows: window.__gsInstances.list() };
+  }, LABEL_B);
+  console.log(`[f1] H1: aislar+teñir B → isolateLabel ${h1.isolateLabel} · tint ${h1.tint.map((v) => v.toFixed(2))}`);
+  expect(h1.isolateLabel, "Aislar debe fijar isolateLabel = 2").toBe(LABEL_B);
+  expect(h1.tint[3], "Teñir debe activar la fuerza del tinte de B").toBeGreaterThan(0);
+  expect(h1.rows.find((r) => r.label === LABEL_B), "fila de B tras aislar y teñir").toMatchObject({ isolated: true, tinted: true, selected: true });
+  // With A isolated away, a click on A's centre hits nothing and clears the selection.
+  const pA = await page.evaluate(() => {
+    const px = window.__gsInstances.project([-1, 0, 0]);
+    const rect = document.getElementById("gpu-canvas").getBoundingClientRect();
+    return { x: rect.left + px[0], y: rect.top + px[1] };
+  });
+  await page.mouse.click(pA.x, pA.y);
+  await expect(page.locator("#inst-status"), "el clic sobre A aislada fuera debe limpiar la selección").toHaveText("Seleccionada: ninguna", { timeout: 15_000 });
+  expect(await page.evaluate(() => window.__gsInstances.current), "selección tras pulsar en A aislada fuera").toBeNull();
+
+  // Escape / Mostrar todo restore the scene.
+  await page.locator("#inst-show-all").click();
+  expect(await page.evaluate(() => window.__gsInstances.isolateLabel), "Mostrar todo debe quitar el aislamiento").toBe(0);
+
+  const health = await page.evaluate(async () => {
+    const device = window.__gsRenderer.device;
+    const lost = await Promise.race([device.lost.then((i) => ({ reason: i.reason, message: i.message })), new Promise((r) => setTimeout(() => r(null), 200))]);
+    return { lost };
+  });
+  expect(health.lost, "el dispositivo WebGPU se perdió durante la prueba").toBeNull();
 });

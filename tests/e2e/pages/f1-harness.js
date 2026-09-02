@@ -248,6 +248,13 @@ export class F1Harness {
     return { nonZero, invalid, byLabel };
   }
 
+  /** Throw on a pixel outside the image (project() rounds, so an edge point can land on width/height). */
+  _assertPixel(x, y) {
+    if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= this.width || y >= this.height) {
+      throw new Error(`píxel (${x},${y}) fuera de la imagen ${this.width}x${this.height}`);
+    }
+  }
+
   /** Gaussian index/label under a pixel of the last idStats() frame (index -1 = nothing). */
   idAt(x, y) {
     if (!this._lastId) throw new Error("idStats() must be called first");
@@ -256,7 +263,8 @@ export class F1Harness {
     if (!v) return { index: -1, label: 0 };
     const index = v - 1;
     const labels = this.labels();
-    return { index, label: index < labels.length ? labels[index] : -1 };
+    // Same convention as renderer.pick(): an index without a label entry is label 0.
+    return { index, label: index < labels.length ? labels[index] : 0 };
   }
 
   /** renderer.pick() (device pixels == harness pixels). */
@@ -266,6 +274,7 @@ export class F1Harness {
 
   /** Expected depth and alpha at one pixel of a DEPTH readback. */
   async depthAt(x, y) {
+    this._assertPixel(x, y);
     const d = await this.render(OUTPUT_MODE.DEPTH);
     const p = y * this.width + x;
     return { depth: d.alpha[p] > 0 ? d.data[p] : null, alpha: d.alpha[p], format: d.format };
@@ -273,6 +282,7 @@ export class F1Harness {
 
   /** Unit view-space normal and alpha at one pixel of a NORMAL readback. */
   async normalAt(x, y) {
+    this._assertPixel(x, y);
     const n = await this.render(OUTPUT_MODE.NORMAL);
     const p = y * this.width + x;
     return {
@@ -284,6 +294,7 @@ export class F1Harness {
 
   /** Colour RGBA (0..255) and alpha coverage in a (2*half+1)^2 box around a pixel. */
   async colourAt(x, y, half = 0) {
+    this._assertPixel(x, y);
     const c = await this.render(OUTPUT_MODE.COLOR);
     const { width, height } = this;
     let covered = 0;

@@ -11,7 +11,8 @@
  * F1 identity layer (plan §3.2.A):
  *   - `labels[i]` (u32 per gaussian, 0 = fondo) indexes the `instances` table
  *     (MAX_INSTANCES records: rigid/affine xform, tint, visible/selected flags).
- *   - Output modes for offscreen rendering: 0 colour, 1 depth, 2 normal, 3 id.
+ *   - Output modes for offscreen rendering: 0 colour, 1 depth, 2 normal, 3 id
+ *     (depth is the alpha-weighted mean, not yet the 2DGS median — see renderOffscreen).
  *   - `renderOffscreen()` / `pick()` / `pickRect()` read results back to the CPU.
  *
  * Data layout (see shared/splat-io.js):
@@ -383,8 +384,20 @@ fn splat_vertex(input: VSIn) -> VSOut {
     return empty_vertex(point_mode);
   }
 
+  // Cofactor matrix of A (columns a1×a2, a2×a0, a0×a1) equals det(A)·A⁻ᵀ, so
+  // it transforms normals under any affine A (non-uniform scale included)
+  // and gives A⁻¹ = cofᵀ / det without a WGSL inverse().
+  let cof = mat3x3<f32>(cross(A[1], A[2]), cross(A[2], A[0]), cross(A[0], A[1]));
+  let det_a = dot(A[0], cof[0]);
+
   let degree = i32(uniforms.camera_pos.w);
-  let dir = normalize(center - uniforms.camera_pos.xyz);
+  // SH coefficients live in the gaussian's own frame: pull the view direction
+  // back through A⁻¹ (only the sign of det matters after normalisation).
+  let dir_world = center - uniforms.camera_pos.xyz;
+  var dir_obj = transpose(cof) * dir_world;
+  if (det_a < 0.0) { dir_obj = -dir_obj; }
+  let use_obj = abs(det_a) > 1e-12 && dot(dir_obj, dir_obj) > 0.0;
+  let dir = normalize(select(dir_world, dir_obj, use_obj));
   var rgb = eval_sh(index, dir, degree);
 
   let color_mode = uniforms.color_mix.x;
@@ -407,12 +420,14 @@ fn splat_vertex(input: VSIn) -> VSOut {
   let rot = quat_to_mat(quat);
 
   // Normal: axis of smallest scale (untransformed scale picks the axis), taken
-  // to world space through A, then to view space; flipped to face the camera.
+  // to world space through the cofactor (inverse-transpose) of A so non-uniform
+  // instance scales keep it perpendicular to the surface, then to view space;
+  // flipped to face the camera (so the sign of det(A) is irrelevant here).
   var axis = rot[0];
   var s_min = g.scale.x;
   if (g.scale.y < s_min) { axis = rot[1]; s_min = g.scale.y; }
   if (g.scale.z < s_min) { axis = rot[2]; }
-  let n_view = R * (A * axis);
+  let n_view = R * (cof * axis);
   let n_len = length(n_view);
   var normal = select(vec3<f32>(0.0, 0.0, 1.0), n_view / n_len, n_len > 1e-8);
   if (dot(normal, cam) > 0.0) {
@@ -977,8 +992,8 @@ export class WebGPUSplatRenderer {
         throw new Error(`labels length ${labels.length} != count ${this.count}`);
       }
       for (let i = 0; i < labels.length; i++) {
-        if (labels[i] >= MAX_INSTANCES) {
-          throw new Error(`labels[${i}] = ${labels[i]} exceeds MAX_INSTANCES`);
+        if (!isNonNegInt(labels[i]) || labels[i] >= MAX_INSTANCES) {
+          throw new Error(`labels[${i}] = ${labels[i]} must be an integer in [0, ${MAX_INSTANCES})`);
         }
       }
       this._labels.set(labels);
@@ -1103,6 +1118,11 @@ export class WebGPUSplatRenderer {
   }
 
   setParams(partial) {
+    if (partial && partial.isolateLabel != null) {
+      if (!isNonNegInt(partial.isolateLabel) || partial.isolateLabel >= MAX_INSTANCES) {
+        throw new Error(`isolateLabel must be an integer in [0, ${MAX_INSTANCES}), got ${partial.isolateLabel}`);
+      }
+    }
     Object.assign(this.params, partial);
     this._idCache = null;
     this._stateVersion++;
@@ -1138,7 +1158,7 @@ export class WebGPUSplatRenderer {
     u[54] = this.camera.eye[2];
     u[55] = this.shDegree;
     ui[56] = mode >>> 0;
-    ui[57] = Math.max(0, this.params.isolateLabel | 0) >>> 0;
+    ui[57] = Math.min(Math.max(0, this.params.isolateLabel | 0), MAX_INSTANCES - 1) >>> 0;
     ui[58] = 0;
     ui[59] = 0;
     u[60] = this.params.selectionHighlight;
@@ -1293,7 +1313,27 @@ export class WebGPUSplatRenderer {
     return target;
   }
 
-  _decodeReadback(target, mapped) {
+  /**
+   * Composite a premultiplied RGBA8 layer over a solid background:
+   * out = layer + clear·clearAlpha·(1 − layerAlpha). The GPU target is always
+   * cleared to transparent because the front-to-back "under" blend would
+   * otherwise treat a pre-filled alpha as an occluder in front of every splat.
+   */
+  _compositeClear(data, clearColor) {
+    const ca = clearColor[3];
+    if (!(ca > 0)) return;
+    const bg = [clearColor[0] * ca * 255, clearColor[1] * ca * 255, clearColor[2] * ca * 255, ca * 255];
+    for (let o = 0; o < data.length; o += 4) {
+      const t = 1 - data[o + 3] / 255;
+      if (t <= 0) continue;
+      data[o] += bg[0] * t;
+      data[o + 1] += bg[1] * t;
+      data[o + 2] += bg[2] * t;
+      data[o + 3] += bg[3] * t;
+    }
+  }
+
+  _decodeReadback(target, mapped, clearColor = [0, 0, 0, 0]) {
     const { mode, width, height, bytesPerRow, format } = target;
     const n = width * height;
     if (mode === OUTPUT_MODE.COLOR) {
@@ -1302,6 +1342,7 @@ export class WebGPUSplatRenderer {
       for (let y = 0; y < height; y++) {
         data.set(src.subarray(y * bytesPerRow, y * bytesPerRow + width * 4), y * width * 4);
       }
+      this._compositeClear(data, clearColor);
       return { data };
     }
     if (mode === OUTPUT_MODE.ID) {
@@ -1356,10 +1397,23 @@ export class WebGPUSplatRenderer {
    *
    * The current camera is used; focal is rescaled by width/viewport so the
    * image is a resampled version of what the canvas shows. Modes:
-   *   0 colour → data: Uint8ClampedArray RGBA (premultiplied by alpha, not un-premultiplied)
+   *   0 colour → data: Uint8ClampedArray RGBA, premultiplied by alpha (not
+   *              un-premultiplied). The GPU target is always cleared to
+   *              transparent; `clearColor` ([r, g, b, a] in 0..1, default
+   *              transparent) is composited *behind* the splats on the CPU
+   *              (out = layer + clear·a·(1 − layerAlpha)), so an opaque
+   *              background such as [1, 1, 1, 1] gives a normal image instead
+   *              of the fully attenuated result the under operator would produce.
    *   1 depth  → data: Float32Array expected depth per pixel (alpha-weighted mean of
    *              view distance -cam.z, i.e. the 2DGS "mean depth", depth_ratio = 0),
-   *              already divided by accumulated alpha; 0 where alpha == 0; plus alpha
+   *              already divided by accumulated alpha; 0 where alpha == 0; plus alpha.
+   *              DEVIATION from plan §3.2.A, which specifies the 2DGS *median* depth
+   *              (first sample with accumulated T < 0.5): a single hardware-blended
+   *              pass cannot see the per-pixel prefix transmittance, so the mean is
+   *              returned for now. Fine on single-surface pixels (F1 acceptance) but
+   *              blends foreground/background at silhouettes; the median variant is
+   *              to be produced by the K-buffer resolve (F3) before F6 TSDF fusion
+   *              consumes it.
    *   2 normal → data: Float32Array(w*h*3) unit view-space normals (smallest-scale axis
    *              facing the camera, +z towards the camera), zeros where alpha == 0; plus alpha
    *   3 id     → data: Uint32Array gaussian index + 1 (0 = nothing) of the first gaussian
@@ -1368,6 +1422,7 @@ export class WebGPUSplatRenderer {
    * (see this.floatFormat). Calls are serialised; targets are cached per mode/size.
    *
    * @param {{mode?: number, width: number, height: number, clearColor?: number[]}} opts
+   *   clearColor: 4 finite numbers (clamped to 0..1); only used in colour mode
    * @returns {Promise<{mode:number,width:number,height:number,data:ArrayBufferView,alpha?:Float32Array,
    *   format:string,camera:{projection:Float32Array,view:Float32Array,focal:number[],viewport:number[],eye:number[]}}>}
    */
@@ -1380,7 +1435,14 @@ export class WebGPUSplatRenderer {
     if (!isNonNegInt(width) || !isNonNegInt(height) || width < 1 || height < 1 || width > maxDim || height > maxDim) {
       return Promise.reject(new Error(`invalid offscreen size ${width}x${height}`));
     }
-    return this._serial(() => this._renderOffscreenNow(mode, width, height, clearColor));
+    let clear;
+    try {
+      assertVec("clearColor", clearColor, 4);
+      clear = Array.from(clearColor, (c) => Math.min(1, Math.max(0, c)));
+    } catch (err) {
+      return Promise.reject(err);
+    }
+    return this._serial(() => this._renderOffscreenNow(mode, width, height, clear));
   }
 
   async _renderOffscreenNow(mode, width, height, clearColor) {
@@ -1394,12 +1456,14 @@ export class WebGPUSplatRenderer {
     this._prepareFrame(mode, focal, viewport);
     const encoder = this.device.createCommandEncoder();
     if (this.count > 0 && this.sortBindGroup) this._encodeSort(encoder);
+    // Always clear to transparent: with "under" blending a pre-filled alpha
+    // would occlude every splat. The requested clearColor is composited on the CPU.
     this._encodeDraw(encoder, {
       view: target.view,
       depthView: target.depthView,
       mode,
       format: target.format,
-      clearColor: mode === OUTPUT_MODE.COLOR ? clearColor : [0, 0, 0, 0],
+      clearColor: [0, 0, 0, 0],
     });
     encoder.copyTextureToBuffer(
       { texture: target.texture },
@@ -1410,7 +1474,11 @@ export class WebGPUSplatRenderer {
     await target.readBuffer.mapAsync(GPUMapMode.READ);
     let decoded;
     try {
-      decoded = this._decodeReadback(target, target.readBuffer.getMappedRange());
+      decoded = this._decodeReadback(
+        target,
+        target.readBuffer.getMappedRange(),
+        mode === OUTPUT_MODE.COLOR ? clearColor : undefined
+      );
     } finally {
       target.readBuffer.unmap();
     }

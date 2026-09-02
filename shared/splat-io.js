@@ -63,9 +63,10 @@ function isPlyMagic(u8) {
   return u8.length >= 3 && u8[0] === 0x70 && u8[1] === 0x6c && u8[2] === 0x79;
 }
 
-/** Accept ArrayBuffer or any ArrayBufferView; always return an ArrayBuffer. */
+/** Accept (Shared)ArrayBuffer or any ArrayBufferView; always return a buffer. */
 function asArrayBuffer(input) {
   if (input instanceof ArrayBuffer) return input;
+  if (typeof SharedArrayBuffer !== "undefined" && input instanceof SharedArrayBuffer) return input;
   if (ArrayBuffer.isView(input)) {
     if (input.byteOffset === 0 && input.byteLength === input.buffer.byteLength) return input.buffer;
     return input.buffer.slice(input.byteOffset, input.byteOffset + input.byteLength);
@@ -103,21 +104,39 @@ function shDegreeFromRestCount(nRest) {
 }
 
 /**
- * Linear (exp) scales for one vertex. `get(name)` returns the raw log-scale.
+ * Linear (exp) scales for one vertex, written to out[o..o+2] (a Float32Array,
+ * so values that overflow float32 count as non-finite). `get(name)` returns
+ * the raw log-scale.
  *   3dgs: exp(scale_0..2); a lone scale_0 is broadcast (isotropic)
  *   2dgs: exp(scale_0..1) + synthesised thin third axis
  *   pointcloud: fixed POINT_SCALE
+ *
+ * Returns false when any scale is non-finite. Trained PLYs can carry diverged
+ * gaussians with NaN/Infinity log-scales; both parsers hide such rows the same
+ * way (scales 0, opacity 0) so neither a NaN nor a bogus exp(0) = 1 blob
+ * reaches the renderers.
  */
-function linearScales(get, has, variant) {
-  if (variant === "pointcloud") return [POINT_SCALE, POINT_SCALE, POINT_SCALE];
-  const sx = Math.exp(get("scale_0"));
-  if (variant === "2dgs") {
-    const sy = Math.exp(get("scale_1"));
-    return [sx, sy, thinDiskScale(sx, sy)];
+function writeLinearScales(out, o, get, has, variant) {
+  if (variant === "pointcloud") {
+    out[o] = out[o + 1] = out[o + 2] = POINT_SCALE;
+    return true;
   }
-  const sy = has("scale_1") ? Math.exp(get("scale_1")) : sx;
-  const sz = has("scale_2") ? Math.exp(get("scale_2")) : sy;
-  return [sx, sy, sz];
+  const sx = Math.exp(get("scale_0"));
+  let sy;
+  let sz;
+  if (variant === "2dgs") {
+    sy = Math.exp(get("scale_1"));
+    sz = thinDiskScale(sx, sy);
+  } else {
+    sy = has("scale_1") ? Math.exp(get("scale_1")) : sx;
+    sz = has("scale_2") ? Math.exp(get("scale_2")) : sy;
+  }
+  out[o] = sx;
+  out[o + 1] = sy;
+  out[o + 2] = sz;
+  if (Number.isFinite(out[o]) && Number.isFinite(out[o + 1]) && Number.isFinite(out[o + 2])) return true;
+  out[o] = out[o + 1] = out[o + 2] = 0;
+  return false;
 }
 
 /**
@@ -368,21 +387,21 @@ function plyToPacked(buffer) {
     }
   }
 
-  const scales = new Array(vertexCount);
+  const scales = new Float32Array(vertexCount * 3);
+  const visible = new Uint8Array(vertexCount);
   const sizeList = new Float32Array(vertexCount);
   const order = new Uint32Array(vertexCount);
+  let rec = null;
+  const get = (name) => rec[name];
   for (let i = 0; i < vertexCount; i++) {
     order[i] = i;
-    const r = raw[i];
-    const get = (name) => (Number.isFinite(r[name]) ? r[name] : 0);
-    scales[i] = linearScales(get, has, variant);
-    if (variant === "pointcloud") {
-      sizeList[i] = 0;
-      continue;
-    }
-    const [sx, sy, sz] = scales[i];
-    const op = has("opacity") ? sigmoid(get("opacity")) : 1;
-    sizeList[i] = sx * sy * sz * op;
+    rec = raw[i];
+    visible[i] = writeLinearScales(scales, i * 3, get, has, variant) ? 1 : 0;
+    // sizeList stays 0 for point clouds and hidden (non-finite scale) rows
+    if (variant === "pointcloud" || !visible[i]) continue;
+    const op = has("opacity") ? sigmoid(rec.opacity) : 1;
+    const vol = scales[i * 3] * scales[i * 3 + 1] * scales[i * 3 + 2] * op;
+    sizeList[i] = Number.isFinite(vol) ? vol : 0;
   }
   order.sort((a, b) => sizeList[b] - sizeList[a]);
 
@@ -397,9 +416,9 @@ function plyToPacked(buffer) {
     dstF[df] = r.x || 0;
     dstF[df + 1] = r.y || 0;
     dstF[df + 2] = r.z || 0;
-    dstF[df + 3] = scales[src][0];
-    dstF[df + 4] = scales[src][1];
-    dstF[df + 5] = scales[src][2];
+    dstF[df + 3] = scales[src * 3];
+    dstF[df + 4] = scales[src * 3 + 1];
+    dstF[df + 5] = scales[src * 3 + 2];
     if (has("f_dc_0")) {
       packed[db + 24] = clampByte((0.5 + SH_C0 * r.f_dc_0) * 255);
       packed[db + 25] = clampByte((0.5 + SH_C0 * r.f_dc_1) * 255);
@@ -414,7 +433,8 @@ function plyToPacked(buffer) {
       packed[db + 25] = 32;
       packed[db + 26] = 32;
     }
-    packed[db + 27] = has("opacity") ? clampByte(sigmoid(r.opacity) * 255) : 255;
+    if (!visible[src]) packed[db + 27] = 0;
+    else packed[db + 27] = has("opacity") ? clampByte(sigmoid(r.opacity) * 255) : 255;
     if (has("rot_0")) {
       packQuatU8(packed, db + 28, r.rot_0, r.rot_1, r.rot_2, r.rot_3);
     } else {
@@ -622,11 +642,9 @@ function plyToCloud(buffer) {
     gaussians[g] = get("x");
     gaussians[g + 1] = get("y");
     gaussians[g + 2] = get("z");
-    gaussians[g + 3] = has("opacity") ? sigmoid(get("opacity")) : 1;
-    const [sx, sy, sz] = linearScales(get, has, variant);
-    gaussians[g + 4] = sx;
-    gaussians[g + 5] = sy;
-    gaussians[g + 6] = sz;
+    const visible = writeLinearScales(gaussians, g + 4, get, has, variant);
+    if (!visible) gaussians[g + 3] = 0;
+    else gaussians[g + 3] = has("opacity") ? sigmoid(get("opacity")) : 1;
     if (has("rot_0")) {
       const qw = get("rot_0");
       const qx = get("rot_1");
@@ -666,7 +684,8 @@ function plyToCloud(buffer) {
       const parts = lines[i].trim().split(/\s+/);
       const rec = {};
       for (let p = 0; p < names.length; p++) rec[names[p]] = parseFloat(parts[p]);
-      fill(i, (name) => (Number.isFinite(rec[name]) ? rec[name] : 0));
+      // raw values, like the binary path, so NaN/inf tokens are handled identically
+      fill(i, (name) => (has(name) ? rec[name] : 0));
     }
   } else {
     const le = format === "binary_le";
