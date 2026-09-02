@@ -1,3 +1,7 @@
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { toSplat32, packedToSplat44 } from "../shared/splat-io.js";
+
 class SplatBuffer {
     // Row format:
     //     Center position (XYZ) - Float32 * 3
@@ -306,8 +310,10 @@ class PlyLoader {
             const loadPromise = this.fetchFile(fileName);
             loadPromise
             .then((plyFileData) => {
-                const plyParser = new PlyParser(plyFileData);
-                const splatBuffer = plyParser.parseToSplatBuffer();
+                const parsed = toSplat32(plyFileData, fileName || "scene.ply");
+                const splatBuffer = new SplatBuffer(packedToSplat44(parsed.packed));
+                splatBuffer.buildPreComputedBuffers();
+                splatBuffer.bounds = parsed.bounds;
                 this.splatBuffer = splatBuffer;
                 resolve(splatBuffer);
             })
@@ -330,11 +336,15 @@ class SplatLoader {
         return new Promise((resolve, reject) => {
             fetch(fileName)
             .then((res) => {
+                if (!res.ok) throw new Error(`${res.status} loading ${fileName}`);
                 return res.arrayBuffer();
             })
             .then((bufferData) => {
-                const splatBuffer = new SplatBuffer(bufferData);
+                const parsed = toSplat32(bufferData, fileName);
+                const normalized = packedToSplat44(parsed.packed);
+                const splatBuffer = new SplatBuffer(normalized);
                 splatBuffer.buildPreComputedBuffers();
+                splatBuffer.bounds = parsed.bounds;
                 resolve(splatBuffer);
             })
             .catch((err) => {
@@ -374,6 +384,7 @@ function createSortWorker(self) {
     let lastProj = [];
 
     let rowSizeFloats = 0;
+    let rowSizeBytes = 0;
 
     const runSort = (viewProj) => {
 
@@ -631,16 +642,21 @@ class Viewer {
 
         this.scene = new THREE.Scene();
 
-        this.renderer = new THREE.WebGLRenderer({
-            antialias: false
-        });
+        try {
+            this.renderer = new THREE.WebGLRenderer({
+                antialias: false,
+                alpha: true
+            });
+            this.renderer.setClearColor(0x000000, 0);
+        } catch (err) {
+            throw new Error(`WebGL is required (${err.message})`);
+        }
         this.renderer.shadowMap.enabled = true;
         this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
         this.renderer.setSize(renderDimensions.x, renderDimensions.y);
 
         if (!this.controls) {
-            this.controls = new THREE.OrbitControls(this.camera, this.renderer.domElement);
-            this.controls.maxPolarAngle = (0.9 * Math.PI) / 2;
+            this.controls = new OrbitControls(this.camera, this.renderer.domElement);
             this.controls.enableDamping = true;
             this.controls.dampingFactor = 0.15;
             this.controls.target.copy(this.initialCameraLookAt);
@@ -694,17 +710,39 @@ class Viewer {
 
     }();
 
+    loadFromArrayBuffer(buffer, fileName = "scene.splat") {
+        const parsed = toSplat32(buffer, fileName);
+        const splatBuffer = new SplatBuffer(packedToSplat44(parsed.packed));
+        splatBuffer.buildPreComputedBuffers();
+        splatBuffer.bounds = parsed.bounds;
+        this.splatBuffer = splatBuffer;
+        if (this.splatMesh) this.scene.remove(this.splatMesh);
+        this.splatMesh = this.buildMesh(this.splatBuffer);
+        this.splatMesh.frustumCulled = false;
+        this.scene.add(this.splatMesh);
+        if (splatBuffer.bounds) {
+            const b = splatBuffer.bounds;
+            this.controls.target.set(b.center[0], b.center[1], b.center[2]);
+            this.camera.position.set(
+                b.center[0],
+                b.center[1] + b.radius * 0.35,
+                b.center[2] + Math.max(b.radius * 2.4, 1.5)
+            );
+        }
+        this.updateWorkerBuffer();
+        return splatBuffer;
+    }
+
     loadFile(fileName) {
         const loadingSpinner = new LoadingSpinner();
         loadingSpinner.show();
         const loadPromise = new Promise((resolve, reject) => {
             let fileLoadPromise;
-            if (fileName.endsWith('.splat')) {
+            const lower = String(fileName).toLowerCase();
+            if (lower.endsWith('.splat') || lower.endsWith('.ply')) {
                 fileLoadPromise = new SplatLoader().loadFromFile(fileName);
-            } else if (fileName.endsWith('.ply')) {
-                fileLoadPromise = new PlyLoader().loadFromFile(fileName);
             } else {
-                reject(new Error(`Viewer::loadFile -> File format not supported: ${fileName}`));
+                fileLoadPromise = new SplatLoader().loadFromFile(fileName);
             }
             fileLoadPromise
             .then((splatBuffer) => {
@@ -721,6 +759,15 @@ class Viewer {
             this.splatMesh.frustumCulled = false;
             loadingSpinner.hide();
             this.scene.add(this.splatMesh);
+            if (splatBuffer.bounds) {
+                const b = splatBuffer.bounds;
+                this.controls.target.set(b.center[0], b.center[1], b.center[2]);
+                this.camera.position.set(
+                    b.center[0],
+                    b.center[1] + b.radius * 0.35,
+                    b.center[2] + Math.max(b.radius * 2.4, 1.5)
+                );
+            }
             this.updateWorkerBuffer();
 
         });
@@ -961,16 +1008,62 @@ class Viewer {
 
 
 
-function init() {
-    function load() {
-        const viewer = new Viewer(null, [0, -1, -.17], [-5, -1, -1], [1, 1, 0]);
-        viewer.init();
-        viewer.loadFile('https://cdn.glitch.me/7eb34fc5-dc2f-4b3b-afc1-8eb4a88210ba/truck.splat')
-        .then(() => {
-            viewer.start();
-        });
+const DEFAULT_URLS = [
+    "https://huggingface.co/cakewalk/splat-data/resolve/main/train.splat",
+    "https://cdn.glitch.me/7eb34fc5-dc2f-4b3b-afc1-8eb4a88210ba/truck.splat",
+];
+
+function showBanner(text) {
+    let el = document.getElementById("splat-status");
+    if (!el) {
+        el = document.createElement("div");
+        el.id = "splat-status";
+        el.style.cssText = "position:fixed;left:16px;bottom:16px;color:#fff;font:13px sans-serif;z-index:10;text-shadow:0 1px 4px #000";
+        document.body.appendChild(el);
     }
-    load();
+    el.textContent = text;
+}
+
+function init() {
+    const viewer = new Viewer(null, [0, -1, -.17], [-5, -1, -1], [1, 1, 0]);
+    viewer.init();
+    viewer.start();
+
+    async function loadPath(url) {
+        showBanner(`Loading ${url}…`);
+        await viewer.loadFile(url);
+        showBanner("Drag a .ply / .splat file onto the window");
+    }
+
+    window.addEventListener("dragover", (e) => e.preventDefault());
+    window.addEventListener("drop", async (e) => {
+        e.preventDefault();
+        const file = e.dataTransfer.files && e.dataTransfer.files[0];
+        if (!file) return;
+        try {
+            showBanner(`Reading ${file.name}…`);
+            const buffer = await file.arrayBuffer();
+            viewer.loadFromArrayBuffer(buffer, file.name);
+            showBanner(`${file.name} loaded`);
+        } catch (err) {
+            showBanner(err.message || String(err));
+        }
+    });
+
+    const queryUrl = new URLSearchParams(location.search).get("url");
+    const queue = queryUrl ? [queryUrl, ...DEFAULT_URLS] : DEFAULT_URLS.slice();
+    (async () => {
+        let lastError = null;
+        for (const url of queue) {
+            try {
+                await loadPath(url);
+                return;
+            } catch (err) {
+                lastError = err;
+            }
+        }
+        showBanner(`${lastError && lastError.message ? lastError.message : lastError} — drop a .ply or .splat file`);
+    })();
 }
 
 init();

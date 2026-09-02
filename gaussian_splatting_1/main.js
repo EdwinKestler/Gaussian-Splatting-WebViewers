@@ -1,90 +1,41 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-// Create the renderer
-var renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setClearColor(0xffffff, 0);
+
+const DEFAULT_URL =
+  "https://huggingface.co/cakewalk/splat-data/resolve/main/train.splat";
+
+const status = document.createElement("div");
+status.id = "status";
+status.style.cssText =
+  "position:fixed;left:16px;bottom:16px;color:#fff;font:13px/1.4 sans-serif;z-index:5;text-shadow:0 1px 4px #000";
+status.textContent = "Loading…";
+document.body.appendChild(status);
+
+let renderer;
+try {
+  renderer = new THREE.WebGLRenderer({ antialias: false, alpha: true });
+} catch (err) {
+  status.textContent = `WebGL is required (${err.message}). Try the converter or a GPU-capable browser.`;
+  throw err;
+}
+renderer.setClearColor(0x000000, 0);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 document.body.appendChild(renderer.domElement);
 
-// Create the scene
 const scene = new THREE.Scene();
-
-// Create the camera
 const camera = new THREE.PerspectiveCamera(
   45,
   window.innerWidth / window.innerHeight,
   0.1,
-  200.0
+  500
 );
-camera.position.set(0, 0, 3.0);
+camera.position.set(0, 0, 3);
 scene.add(camera);
 
-// Create orbit controls
 const controls = new OrbitControls(camera, renderer.domElement);
-// controls.maxPolarAngle = (0.9 * Math.PI) / 2;
 controls.enableDamping = true;
 controls.dampingFactor = 0.5;
-
-let sortReady = false;
-function sortSplats(matrices, view) {
-  const vertexCount = matrices.length / 16;
-
-  let maxDepth = -Infinity;
-  let minDepth = Infinity;
-  let depthList = new Float32Array(vertexCount);
-  let sizeList = new Int32Array(depthList.buffer);
-  for (let i = 0; i < vertexCount; i++) {
-    let depth =
-      view[0] * matrices[i * 16 + 12] -
-      view[1] * matrices[i * 16 + 13] -
-      view[2] * matrices[i * 16 + 14];
-    depthList[i] = depth;
-    if (depth > maxDepth) maxDepth = depth;
-    if (depth < minDepth) minDepth = depth;
-  }
-
-  // This is a 16 bit single-pass counting sort
-  let depthInv = (256 * 256 - 1) / (maxDepth - minDepth);
-  let counts0 = new Uint32Array(256 * 256);
-  for (let i = 0; i < vertexCount; i++) {
-    sizeList[i] = ((depthList[i] - minDepth) * depthInv) | 0;
-    counts0[sizeList[i]]++;
-  }
-  let starts0 = new Uint32Array(256 * 256);
-  for (let i = 1; i < 256 * 256; i++)
-    starts0[i] = starts0[i - 1] + counts0[i - 1];
-  let depthIndex = new Uint32Array(vertexCount);
-  for (let i = 0; i < vertexCount; i++) depthIndex[starts0[sizeList[i]]++] = i;
-
-  let sortedMatrices = new Float32Array(vertexCount * 16);
-  for (let j = 0; j < vertexCount; j++) {
-    let i = depthIndex[j];
-    for (let k = 0; k < 16; k++) {
-      sortedMatrices[j * 16 + k] = matrices[i * 16 + k];
-    }
-  }
-
-  return sortedMatrices;
-}
-
-function createWorker(self) {
-  let sortFunction;
-  let matrices;
-  self.onmessage = (e) => {
-    if (e.data.sortFunction) {
-      eval(e.data.sortFunction);
-      sortFunction = sortSplats;
-    }
-    if (e.data.matrices) {
-      matrices = new Float32Array(e.data.matrices);
-    }
-    if (e.data.view) {
-      const view = new Float32Array(e.data.view);
-      const sortedMatrices = sortFunction(matrices, view);
-      self.postMessage({ sortedMatrices }, [sortedMatrices.buffer]);
-    }
-  };
-}
 
 const size = new THREE.Vector2();
 renderer.getSize(size);
@@ -96,6 +47,7 @@ const material = new THREE.ShaderMaterial({
     viewport: { value: new Float32Array([size.x, size.y]) },
     focal: { value: focal },
   },
+  defines: { USE_INSTANCING: "" },
   vertexShader: `varying vec4 vColor;
             varying vec2 vPosition;
             uniform vec2 viewport;
@@ -103,18 +55,8 @@ const material = new THREE.ShaderMaterial({
 
             void main () {
                 vec4 center = vec4(instanceMatrix[3][0], instanceMatrix[3][1], instanceMatrix[3][2], 1);
-                // Adjust View Pose
-                mat4 adjViewMatrix = inverse(viewMatrix);
-                adjViewMatrix[0][1] *= -1.0;
-                adjViewMatrix[1][0] *= -1.0;
-                adjViewMatrix[1][2] *= -1.0;
-                adjViewMatrix[2][1] *= -1.0;
-                adjViewMatrix[3][1] *= -1.0;
-                adjViewMatrix = inverse(adjViewMatrix);
-                mat4 modelView = adjViewMatrix * modelMatrix;
-
-                vec4 camspace = modelView * center;
-                vec4 pos2d = projectionMatrix * mat4(1,0,0,0,0,-1,0,0,0,0,1,0,0,0,0,1)  * camspace;
+                vec4 camspace = modelViewMatrix * center;
+                vec4 pos2d = projectionMatrix * camspace;
 
                 float bounds = 1.2 * pos2d.w;
                 if (pos2d.z < -pos2d.w || pos2d.x < -bounds || pos2d.x > bounds
@@ -124,12 +66,12 @@ const material = new THREE.ShaderMaterial({
                 }
 
                 mat3 J = mat3(
-                    focal / camspace.z, 0., -(focal * camspace.x) / (camspace.z * camspace.z), 
-                    0., -focal / camspace.z, (focal * camspace.y) / (camspace.z * camspace.z), 
+                    focal / camspace.z, 0., -(focal * camspace.x) / (camspace.z * camspace.z),
+                    0., focal / camspace.z, -(focal * camspace.y) / (camspace.z * camspace.z),
                     0., 0., 0.
                 );
 
-                mat3 W = transpose(mat3(modelView));
+                mat3 W = transpose(mat3(modelViewMatrix));
                 mat3 T = W * J;
                 mat3 cov = transpose(T) * mat3(instanceMatrix) * T;
 
@@ -143,7 +85,8 @@ const material = new THREE.ShaderMaterial({
                 float radius = length(vec2((diagonal1 - diagonal2) / 2.0, offDiagonal));
                 float lambda1 = mid + radius;
                 float lambda2 = max(mid - radius, 0.1);
-                vec2 diagonalVector = normalize(vec2(offDiagonal, lambda1 - diagonal1));
+                vec2 axisVec = vec2(offDiagonal, lambda1 - diagonal1);
+                vec2 diagonalVector = length(axisVec) < 1e-6 ? vec2(1.0, 0.0) : normalize(axisVec);
                 vec2 v1 = min(sqrt(2.0 * lambda1), 1024.0) * diagonalVector;
                 vec2 v2 = min(sqrt(2.0 * lambda2), 1024.0) * vec2(diagonalVector.y, -diagonalVector.x);
 
@@ -151,8 +94,8 @@ const material = new THREE.ShaderMaterial({
                 vPosition = position.xy;
 
                 gl_Position = vec4(
-                    vCenter 
-                        + position.x * v2 / viewport * 2.0 
+                    vCenter
+                        + position.x * v2 / viewport * 2.0
                         + position.y * v1 / viewport * 2.0, 0.0, 1.0);
             }`,
   fragmentShader: `varying vec4 vColor;
@@ -173,119 +116,118 @@ material.blendDst = THREE.OneFactor;
 material.blendSrcAlpha = THREE.OneMinusDstAlphaFactor;
 material.blendDstAlpha = THREE.OneFactor;
 material.depthTest = false;
-material.needsUpdate = true;
+material.depthWrite = false;
+material.transparent = true;
 
-window.addEventListener("resize", () => {
+function resize() {
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, h);
   renderer.getSize(size);
-  const focal =
-    size.y /
-    2.0 /
-    Math.tan(((camera.components.camera.data.fov / 2.0) * Math.PI) / 180.0);
+  const nextFocal = size.y / 2.0 / Math.tan(((camera.fov / 2.0) * Math.PI) / 180.0);
   material.uniforms.viewport.value[0] = size.x;
   material.uniforms.viewport.value[1] = size.y;
-  material.uniforms.focal.value = focal;
-});
+  material.uniforms.focal.value = nextFocal;
+}
+window.addEventListener("resize", resize);
 
-fetch("https://huggingface.co/cakewalk/splat-data/resolve/main/train.splat")
-  .then((data) => data.blob())
-  .then((res) => res.arrayBuffer())
-  .then((buffer) => {
-    const rowLength = 3 * 4 + 3 * 4 + 4 + 4;
-    const vertexCount = Math.floor(buffer.byteLength / rowLength);
-    const f_buffer = new Float32Array(buffer);
-    const u_buffer = new Uint8Array(buffer);
+const worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
+let mesh = null;
+let sortReady = false;
+let animating = false;
 
-    const matrices = new Float32Array(vertexCount * 16);
-    for (let i = 0; i < vertexCount; i++) {
-      const quat = new THREE.Quaternion(
-        (u_buffer[32 * i + 28 + 1] - 128) / 128.0,
-        (u_buffer[32 * i + 28 + 2] - 128) / 128.0,
-        -(u_buffer[32 * i + 28 + 3] - 128) / 128.0,
-        (u_buffer[32 * i + 28 + 0] - 128) / 128.0
-      );
-      const center = new THREE.Vector3(
-        f_buffer[8 * i + 0],
-        f_buffer[8 * i + 1],
-        -f_buffer[8 * i + 2]
-      );
-      const scale = new THREE.Vector3(
-        f_buffer[8 * i + 3 + 0],
-        f_buffer[8 * i + 3 + 1],
-        f_buffer[8 * i + 3 + 2]
-      );
+function fitCamera(bounds) {
+  if (!bounds) return;
+  const c = bounds.center;
+  controls.target.set(c[0], c[1], c[2]);
+  camera.position.set(c[0], c[1], c[2] + Math.max(bounds.radius * 2.2, 1.5));
+  camera.near = Math.max(bounds.radius / 100, 0.05);
+  camera.far = Math.max(bounds.radius * 20, 50);
+  camera.updateProjectionMatrix();
+}
 
-      const mtx = new THREE.Matrix4();
-      mtx.makeRotationFromQuaternion(quat);
-      mtx.transpose();
-      mtx.scale(scale);
-      const mtx_t = mtx.clone();
-      mtx.transpose();
-      mtx.premultiply(mtx_t);
-      mtx.setPosition(center);
+function startMesh(matrices, count, bounds, label) {
+  if (mesh) {
+    scene.remove(mesh);
+    mesh.geometry.dispose();
+  }
+  mesh = new THREE.InstancedMesh(geometry, material, count);
+  mesh.frustumCulled = false;
+  mesh.instanceMatrix.array = matrices;
+  mesh.instanceMatrix.needsUpdate = true;
+  scene.add(mesh);
+  mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  fitCamera(bounds);
+  status.textContent = `${label} · ${count.toLocaleString()} gaussians`;
+  sortReady = true;
+  if (!animating) {
+    animating = true;
+    animate();
+  }
+}
 
-      // RGBA
-      mtx.elements[3] = u_buffer[32 * i + 24 + 0] / 255;
-      mtx.elements[7] = u_buffer[32 * i + 24 + 1] / 255;
-      mtx.elements[11] = u_buffer[32 * i + 24 + 2] / 255;
-      mtx.elements[15] = u_buffer[32 * i + 24 + 3] / 255;
+worker.onmessage = (e) => {
+  if (e.data.sortedMatrices && mesh) {
+    mesh.instanceMatrix.array = new Float32Array(e.data.sortedMatrices);
+    mesh.instanceMatrix.needsUpdate = true;
+    sortReady = true;
+    return;
+  }
+  if (e.data.ok === false) {
+    status.textContent = e.data.error;
+    return;
+  }
+  if (e.data.matrices) {
+    startMesh(
+      new Float32Array(e.data.matrices),
+      e.data.count,
+      e.data.bounds,
+      e.data.format || "splat"
+    );
+    worker.postMessage({ matrices: e.data.matrices });
+  }
+};
 
-      for (let j = 0; j < 16; j++) {
-        matrices[i * 16 + j] = mtx.elements[j];
-      }
-    }
+async function loadUrl(url) {
+  status.textContent = `Downloading ${url}…`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`${res.status} loading ${url}`);
+  const buffer = await res.arrayBuffer();
+  const name = url.split("/").pop() || "scene";
+  worker.postMessage({ buffer, name }, [buffer]);
+}
 
+async function loadFile(file) {
+  status.textContent = `Reading ${file.name}…`;
+  const buffer = await file.arrayBuffer();
+  worker.postMessage({ buffer, name: file.name }, [buffer]);
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  if (sortReady && mesh) {
+    sortReady = false;
     const view = new Float32Array([
       camera.matrixWorld.elements[2],
       camera.matrixWorld.elements[6],
       camera.matrixWorld.elements[10],
     ]);
+    worker.postMessage({ view }, [view.buffer]);
+  }
+  controls.update();
+  renderer.render(scene, camera);
+}
 
-    const iMesh = new THREE.InstancedMesh(geometry, material, vertexCount);
-    iMesh.frustumCulled = false;
-    iMesh.instanceMatrix.array = sortSplats(matrices, view);
-    iMesh.instanceMatrix.needsUpdate = true;
-    scene.add(iMesh);
+window.addEventListener("dragover", (e) => e.preventDefault());
+window.addEventListener("drop", (e) => {
+  e.preventDefault();
+  const file = e.dataTransfer.files && e.dataTransfer.files[0];
+  if (file) loadFile(file).catch((err) => (status.textContent = err.message));
+});
 
-    const worker = new Worker(
-      URL.createObjectURL(
-        new Blob(["(", createWorker.toString(), ")(self)"], {
-          type: "application/javascript",
-        })
-      )
-    );
-
-    worker.postMessage(
-      {
-        sortFunction: sortSplats.toString(),
-        matrices: matrices.buffer,
-      },
-      [matrices.buffer]
-    );
-
-    worker.onmessage = (e) => {
-      iMesh.instanceMatrix.array = new Float32Array(e.data.sortedMatrices);
-      iMesh.instanceMatrix.needsUpdate = true;
-      sortReady = true;
-    };
-    sortReady = true;
-
-    function animate() {
-      requestAnimationFrame(animate);
-      if (sortReady) {
-        sortReady = false;
-        const view = new Float32Array([
-          camera.matrixWorld.elements[2],
-          camera.matrixWorld.elements[6],
-          camera.matrixWorld.elements[10],
-        ]);
-        worker.postMessage({ view }, [view.buffer]);
-      }
-      controls.update();
-      renderer.render(scene, camera);
-    }
-
-    animate();
-  })
-  .catch((error) => {
-    console.error(error);
-  });
+const queryUrl = new URLSearchParams(location.search).get("url");
+loadUrl(queryUrl || DEFAULT_URL).catch((err) => {
+  status.textContent = `${err.message} — drop a .ply or .splat file`;
+});

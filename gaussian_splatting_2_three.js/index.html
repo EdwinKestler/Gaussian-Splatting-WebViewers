@@ -1,25 +1,28 @@
-
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
-  <title>Gaussian Splatting: Three.js demo 2</title>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="x-ua-compatible" content="ie=edge">
-  <script src="https://cdn.jsdelivr.net/npm/three@0.157.0/build/three.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/controls/OrbitControls.js"></script>
+  <title>Gaussian Splatting: Three.js viewer 2</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <style>
-    body {
-      background-color: #000000;
-      height: 100vh;
+    html, body {
+      background: #000;
+      height: 100%;
       overflow: hidden;
-      margin: 0px;
+      margin: 0;
     }
   </style>
 </head>
 <body>
-  <script src="main.js"></script>
+  <script async src="https://ga.jspm.io/npm:es-module-shims@1.10.0/dist/es-module-shims.js"></script>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+  <script type="module" src="main.js"></script>
 </body>
-
 </html>

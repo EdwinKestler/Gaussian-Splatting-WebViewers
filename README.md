@@ -1,64 +1,111 @@
-# Gaussian-Splatting-WebViewers
+# Gaussian Splatting Web Viewers
 
+Experimental browser viewers for [3D Gaussian Splatting for Real-Time Radiance Field Rendering](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/).
 
-https://github.com/akbartus/Gaussian-Splatting-WebViewers/assets/54757270/aa827069-32bb-473b-8982-1aa9fb656d28
+The original Three.js and A-Frame demos are still here. A new **WebGPU 3DGS viewer** uses [GaussForge](https://github.com/3dgscloud/GaussForge) to decode PLY / SPLAT / SPZ / KSPLAT / SOG, then sorts and rasterizes on the GPU.
 
+Serve the repo from the **repository root** (the WebGPU worker imports `../shared/splat-io.js`, so `file://` and serving only the subfolder will fail):
 
-
-### **Description / Rationale**
-This is an experimental project demonstrating various implementations of Gaussian Splatting (a real-time renderer for <a href="https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/">3D Gaussian Splatting for Real-Time Radiance Field Rendering</a>) viewers for the web, which are powered by Three.js and A-Frame. First gaussian splatting viewer (Three.js version) was written based on example created by Quadr as <a href="https://github.com/quadjr/aframe-gaussian-splatting/tree/main">A-Frame component</a> (MIT Licence, Copyright (c) 2023 Kevin Kwok, Junya Kuwada). The second web viewer (Three.js and A-Frame versions) is the simplified and adapted version of Mark Kellog's <a href="https://github.com/mkkellogg/GaussianSplats3D">GaussianSplats3D Three.js example</a> (MIT License, Copyright (c) 2023 Mark Kellogg). 
-
-All these repositories, originally, are based on Kevin Kwok's <a href="https://github.com/antimatter15/splat">WebGL implementation of Gaussian Splatting</a>(MIT License, Copyright (c) 2023 Kevin Kwok). For further details, please refer to respective repositories.   
-
-### **Instructions**
-To use a web viewer locally copy Three.js or A-Frame version of the web viewer to your local server. For using A-Frame component, copy the following code:
+```bash
+cd Gaussian-Splatting-WebViewers
+python3 -m http.server 8090 --bind 127.0.0.1
 ```
-<!DOCTYPE html>
-<html lang="en">
 
-<head>
-  <title>Gaussian Splatting: A-Frame Demo</title>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <script src='https://aframe.io/releases/1.4.2/aframe.min.js'></script>
-  <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/controls/OrbitControls.js"></script>
-  <script src="gaussian-splatting.js"></script>
-</head>
-<body>
-   <a-scene>
-        <a-entity gaussian-splatting="splatUrl: https://cdn.glitch.me/7eb34fc5-dc2f-4b3b-afc1-8eb4a88210ba/truck.splat; initialPosition: -3 -2 -3; downsampleFactor: 1; vertexCount: 1200000; splatPixelDiscard: 2.0; slider: true"></a-entity>
-    </a-scene>
-</body>
-</html>
+Then open [http://127.0.0.1:8090/](http://127.0.0.1:8090/) or the WebGPU viewer at [http://127.0.0.1:8090/gaussian_splatting_webgpu/](http://127.0.0.1:8090/gaussian_splatting_webgpu/).
+
+### WebGPU Chrome (Linux / Vulkan)
+
+A scratch `--user-data-dir` often cannot open `chrome://newtab` (`incorrect profile type`). Use a **fresh profile** and pass a real `http://` URL:
+
+```bash
+rm -rf ~/.cache/chrome-webgpu-3dgs
+
+google-chrome \
+  --user-data-dir=$HOME/.cache/chrome-webgpu-3dgs \
+  --no-first-run \
+  --no-default-browser-check \
+  --ignore-gpu-blocklist \
+  --enable-unsafe-webgpu \
+  --enable-webgpu-developer-features \
+  --enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE \
+  --use-angle=vulkan \
+  --new-window \
+  'http://127.0.0.1:8090/gaussian_splatting_webgpu/?url=./demo.ply'
 ```
-A-Frame component has the following schemas, which could be changed:
-* <b>splatUrl: { type: "string", default: "https://cdn.glitch.me/7eb34fc5-dc2f-4b3b-afc1-8eb4a88210ba/truck.splat" }</b> - url/link to splat file. Accepts original .ply file generated or .splat file, which is converted and compressed (link to converter will be provided soon)
-* <b>initialPosition: { type: "string", default: "0 0 0" }</b> - initial position of camera.
-* <b>downsampleFactor: { type: "int", default: 1 }</b> - downsampling factor. 1 is original view. Value higher than 1 does downsampling. 
-* <b>vertexCount: { type: "int", default: 1000000 }</b> - the count of vertexes, which will be displayed on first load and used as max value in a slider.
-* <b>splatSize: { type: "number", default: 1159.5880733038064 }</b> - the value represents camera Fx and Fy and used as max value in a slider. 
-* <b>splatPixelDiscard: { type: "float", default: 2.0 }</b> - value for discarding pixels. 
-* <b>slider: { type: "boolean", default: true }</b> - enable or disable sliders (vertexCount and splatSize).
-* <b>splatColor: { type: "string", default: "grayscale" }</b> - splat color scheme/palette. Can be "color", "blackAndWhite", "grayscale", "green".
 
-### **Converting .ply to .splat and compression**
-In order to convert .ply file, which is created after following 3D Gaussian Splatting for Real-Time Radiance Field Rendering tutorial, you can use the following tool, which is simplified and reduced version of  Kevin Kwok's <a href="https://github.com/antimatter15/splat">WebGL implementation of Gaussian Splatting</a> (MIT License, Copyright (c) 2023 Kevin Kwok).
+Or:
 
-Open <a href="https://splat-converter.glitch.me/">this link</a>, select compression value (basically reducing the number of vertexes) from 1 (original) to 10 (max), select format to convert to, confirm and then drag your [name].ply file on window, and wait for it to do the conversion and download the file. This resulting file (.ply or .splat), then, can be used with first web viewer (https://gaussian-splatting2.glitch.me/) and with this (https://github.com/antimatter15/splat). 
+```bash
+./gaussian_splatting_webgpu/launch-webgpu-chrome.sh
+```
 
-**Please note:** Kevin Kwok's work already contains this converter.
+Ignore `DEPRECATED_ENDPOINT` and TensorFlow Lite lines. The new-tab profile error means you launched without a URL or reused a bad profile (do not use `/tmp/chrome-webgpu-profile`). Confirm WebGPU in `chrome://gpu` or with `!!navigator.gpu` in DevTools.
 
-  
-### **Updates**
-* <del>The possibility of changing the size of a splat file in splat converter.</del>
-* Making web viewer 1 work faster.
-* <del>Adding new features to A-Frame component.</del>
-* Adding converter for the second web viewer.
+Full notes: [docs/webgpu-chrome.md](docs/webgpu-chrome.md).
 
-### **Tech Stack**
-The project is powered by AFrame and Three.js. Truck.splat file was taken from  Mark Kellog's repository.  
+## Viewers
 
-### **Demo**
-To see web viewers at work, visit the following pages: 
-* Web Viewer 1: <a href="https://gaussian-splatting2.glitch.me/">Three.js</a>.
-* Web Viewer 2: <a href="https://gaussian-splatting1.glitch.me/">Three.js</a> and <a href="https://gaussiansplatting2-aframe.glitch.me/">A-Frame</a>. 
+| Path | Renderer | What it is for |
+| --- | --- | --- |
+| `gaussian_splatting_webgpu/` | WebGPU | Recommended 3DGS viewer. GaussForge decode (PLY/SPZ/KSPLAT/SOG/SPLAT) + GPU sort |
+| `gaussian_splatting_1/` | Three.js WebGL | Compact 32-byte instanced-mesh viewer |
+| `gaussian_splatting_2_three.js/` | Three.js WebGL | Covariance-buffer viewer (Kellogg-style) |
+| `gaussian_splatting_2_aframe/` | A-Frame WebGL | Same splats inside an A-Frame scene |
+| `splat_converter/` | — | Convert PLY ↔ 32-byte splat ↔ 44-byte splat |
+
+Every viewer accepts `?url=` pointing at a scene file, and every WebGL/WebGPU viewer accepts a file drop. The WebGPU viewer also reads `.spz`, `.ksplat`, and `.sog` through GaussForge.
+
+## File formats
+
+There are two `.splat` layouts in the wild. They are **not interchangeable**.
+
+| Layout | Bytes / gaussian | Contents | Used by |
+| --- | --- | --- | --- |
+| Compact | 32 | `xyz f32`, `scale f32`, `RGBA u8`, `quat u8` | Viewer 1, converter default, antimatter15/splat, WebGPU viewer |
+| Extended | 44 | `xyz f32`, `scale f32`, `RGBA u8`, `quat f32` | Original Viewer 2 |
+
+INRIA training output is `.ply` (`x,y,z`, log-scale, quaternion, SH DC, logit opacity). Shared parser: `shared/splat-io.js`. It detects the format, importance-sorts PLY gaussians, and emits compact 32-byte rows.
+
+## WebGPU 3DGS viewer
+
+`gaussian_splatting_webgpu/` is the recommended renderer. Format decoding uses **[GaussForge](https://github.com/3dgscloud/GaussForge)** (`@gaussforge/wasm`) — the same conversion IR as [3DGS Viewer](https://www.3dgsviewers.com/) — then a WebGPU compute sort + ellipse rasterizer.
+
+- Loads **PLY**, **compressed PLY**, **SPLAT**, **KSPLAT**, **SPZ**, and **SOG**
+- GaussForge IR: log-scale, pre-sigmoid opacity, SH DC, quaternion `wxyz`
+- View-dependent **SH degree 1** when rest coefficients are present
+- GPU 16-bit counting sort every frame (histogram + prefix sum + scatter)
+- Export back through GaussForge (PLY / SPLAT / SPZ / KSPLAT / SOG)
+- Falls back to `shared/splat-io.js` if WASM cannot load
+
+Requires Chrome 113+, Edge 113+, or another browser with WebGPU. If WebGPU is missing, the page links back to the WebGL viewers. Launch instructions: [docs/webgpu-chrome.md](docs/webgpu-chrome.md).
+
+## A-Frame component
+
+```html
+<script src="https://aframe.io/releases/1.4.2/aframe.min.js"></script>
+<script src="gaussian-splatting.js"></script>
+<a-entity gaussian-splatting="splatUrl: ./scene.ply; slider: true; splatColor: color"></a-entity>
+```
+
+| Schema | Default | Meaning |
+| --- | --- | --- |
+| `splatUrl` | HuggingFace train.splat | `.ply` or `.splat` URL |
+| `initialPosition` | `0 0 0` | unused by the camera; put the camera entity where you want |
+| `downsampleFactor` | `1` | keep 1/N gaussians |
+| `vertexCount` | `1000000` | slider maximum |
+| `splatSize` | `1159.58…` | focal length used as splat scale |
+| `splatPixelDiscard` | `2.0` | gaussian radius cutoff |
+| `slider` | `true` | on-screen vertex-count and splat-size sliders |
+| `splatColor` | `color` | `color`, `grayscale`, `blackAndWhite`, `green` |
+
+## Heritage
+
+- Viewer 1 started from [quadjr/aframe-gaussian-splatting](https://github.com/quadjr/aframe-gaussian-splatting) (MIT, Kevin Kwok, Junya Kuwada)
+- Viewer 2 started from [mkkellogg/GaussianSplats3D](https://github.com/mkkellogg/GaussianSplats3D) (MIT, Mark Kellogg)
+- Converter and the 32-byte layout follow [antimatter15/splat](https://github.com/antimatter15/splat) (MIT, Kevin Kwok)
+- Multi-format decode uses [GaussForge](https://github.com/3dgscloud/GaussForge) (Apache-2.0)
+- The WebGPU path follows the same 3DGS projection as those projects, with GPU counting sort instead of a CPU worker
+
+## License
+
+MIT. See `LICENSE`.

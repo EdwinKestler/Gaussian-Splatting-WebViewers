@@ -1,0 +1,13 @@
+.idea/
+.vscode/
+*.swp
+.DS_Store
+node_modules/
+
+# Local captures / symlinks (keep demo.ply)
+gaussian_splatting_webgpu/model.splat
+splats/
+
+# Chrome scratch profiles
+.cache/
+chrome-webgpu*/

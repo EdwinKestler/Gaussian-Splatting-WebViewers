@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>WebGPU splat selftest</title></head>
+<body>
+<pre id="out">starting</pre>
+<canvas id="c" width="640" height="400"></canvas>
+<script type="module">
+const out = document.getElementById("out");
+const log = (m) => { out.textContent += "\n" + m; console.log(m); };
+try {
+  const { toSplat32 } = await import("../shared/splat-io.js");
+  const { WebGPUSplatRenderer } = await import("./gpu-renderer.js");
+  const res = await fetch("./demo.ply");
+  log("demo.ply status " + res.status);
+  const buf = await res.arrayBuffer();
+  const parsed = toSplat32(buf, "demo.ply");
+  log("parsed " + parsed.count + " " + parsed.format);
+  if (!navigator.gpu) {
+    log("NO_WEBGPU");
+    document.title = "NO_WEBGPU";
+  } else {
+    const renderer = new WebGPUSplatRenderer(document.getElementById("c"));
+    await renderer.init();
+    log("webgpu init ok");
+    renderer.setSplats(parsed.packed);
+    const proj = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]);
+    const view = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,-3,1]);
+    renderer.setCamera(proj, view, [400, 400], [640, 400]);
+    renderer.render();
+    await renderer.device.queue.onSubmittedWorkDone();
+    log("rendered " + parsed.count);
+    document.title = "RENDER_OK " + parsed.count;
+  }
+  log("DONE");
+} catch (err) {
+  log("ERROR " + (err && err.stack ? err.stack : err));
+  document.title = "ERROR";
+}
+</script>
+</body>
+</html>

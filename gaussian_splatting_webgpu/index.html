@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+  <title>WebGPU Gaussian Splatting Viewer</title>
+  <style>
+    :root {
+      --bg: #07090d;
+      --panel: rgba(12, 16, 24, 0.78);
+      --line: rgba(255, 255, 255, 0.08);
+      --text: #e8eef8;
+      --muted: #93a0b5;
+      --accent: #7ee0c8;
+      --warn: #ffb454;
+      --err: #ff6b7a;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font: 13px/1.45 "Segoe UI", system-ui, sans-serif;
+      overflow: hidden;
+    }
+    body.drag { outline: 2px dashed var(--accent); outline-offset: -12px; }
+    canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+      touch-action: none;
+    }
+    #hud {
+      position: absolute;
+      inset: 16px auto auto 16px;
+      min-width: 280px;
+      max-width: 340px;
+      padding: 14px 16px 16px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      backdrop-filter: blur(16px);
+      box-shadow: 0 18px 50px rgba(0, 0, 0, 0.35);
+    }
+    h1 {
+      margin: 0 0 4px;
+      font-size: 15px;
+      font-weight: 650;
+      letter-spacing: 0.02em;
+    }
+    .row {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+    #fps { color: var(--accent); font-variant-numeric: tabular-nums; }
+    #meta { color: var(--muted); word-break: break-all; }
+    label {
+      display: grid;
+      grid-template-columns: 92px 1fr 36px;
+      gap: 8px;
+      align-items: center;
+      margin: 6px 0;
+      color: var(--muted);
+    }
+    label span.val { text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
+    input[type="range"] { width: 100%; }
+    input[type="text"], select {
+      width: 100%;
+      margin: 6px 0;
+      background: #10151e;
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 7px 8px;
+    }
+    .btns { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 4px; }
+    button, .file-btn {
+      background: #18202c;
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 6px 9px;
+      cursor: pointer;
+    }
+    button:hover, .file-btn:hover { border-color: var(--accent); }
+    .file-btn { display: inline-block; }
+    #status { min-height: 1.4em; }
+    #status[data-kind="ok"] { color: var(--accent); }
+    #status[data-kind="err"] { color: var(--err); }
+    #progress {
+      height: 3px;
+      background: var(--line);
+      border-radius: 99px;
+      overflow: hidden;
+      margin: 8px 0 2px;
+    }
+    #progress-bar { height: 100%; width: 0; background: var(--accent); }
+    #hint {
+      position: absolute;
+      left: 50%;
+      bottom: 18px;
+      transform: translateX(-50%);
+      color: var(--muted);
+      pointer-events: none;
+      text-align: center;
+    }
+    #overlay, #unsupported {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      background: rgba(7, 9, 13, 0.35);
+      pointer-events: none;
+    }
+    #overlay.hidden, #unsupported.hidden { display: none; }
+    .card {
+      pointer-events: auto;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 20px 22px;
+      max-width: 420px;
+    }
+    a { color: var(--accent); }
+    .check { display: flex; align-items: center; gap: 8px; color: var(--muted); margin: 8px 0; }
+  </style>
+</head>
+<body>
+  <canvas id="gpu-canvas"></canvas>
+  <aside id="hud">
+    <h1>WebGPU 3DGS Viewer</h1>
+    <div class="row">
+      <span id="fps">0 fps</span>
+      <span>GaussForge + GPU sort</span>
+    </div>
+    <div id="meta">No scene loaded</div>
+    <div id="progress"><div id="progress-bar"></div></div>
+    <div id="status">Starting…</div>
+    <input id="url-input" type="text" placeholder="https://…/scene.ply .splat .spz .ksplat .sog" />
+    <div class="btns">
+      <button id="load-url" type="button">Load URL</button>
+      <label class="file-btn">Open file
+        <input id="file-input" type="file" accept=".ply,.splat,.spz,.ksplat,.sog,.compressed.ply" hidden />
+      </label>
+      <button id="load-demo" type="button">Demo PLY</button>
+      <button id="load-train" type="button">Train .splat</button>
+      <button id="load-local" type="button">Local test.splat</button>
+      <button id="y-flip" type="button">Flip Y-up</button>
+      <select id="export-format">
+        <option value="">Export via GaussForge…</option>
+        <option value="ply">Export PLY</option>
+        <option value="splat">Export SPLAT</option>
+        <option value="spz">Export SPZ</option>
+        <option value="ksplat">Export KSPLAT</option>
+        <option value="sog">Export SOG</option>
+        <option value="compressed.ply">Export compressed PLY</option>
+      </select>
+    </div>
+    <div class="check"><input id="point-mode" type="checkbox" /> Point cloud debug</div>
+    <label>Scale <input id="splat-scale" type="range" min="0.2" max="3" step="0.05" value="1" /><span class="val"></span></label>
+    <label>Opacity <input id="opacity" type="range" min="0.1" max="2" step="0.05" value="1" /><span class="val"></span></label>
+    <label>Keep 1/N <input id="compression" type="range" min="1" max="10" step="1" value="1" /><span class="val"></span></label>
+    <label>Brightness <input id="brightness" type="range" min="-0.4" max="0.4" step="0.01" value="0" /><span class="val"></span></label>
+    <label>Contrast <input id="contrast" type="range" min="0.4" max="2" step="0.01" value="1" /><span class="val"></span></label>
+    <label>Gamma <input id="gamma" type="range" min="0.4" max="2.2" step="0.01" value="1" /><span class="val"></span></label>
+    <label>Exposure <input id="intensity" type="range" min="0.2" max="2.5" step="0.01" value="1" /><span class="val"></span></label>
+    <label>Saturation <input id="saturation" type="range" min="0" max="2" step="0.01" value="1" /><span class="val"></span></label>
+    <label>Discard <input id="pixel-discard" type="range" min="1" max="8" step="0.1" value="4" /><span class="val"></span></label>
+    <label>AA <input id="antialias" type="range" min="0" max="1.5" step="0.05" value="0.3" /><span class="val"></span></label>
+    <label>Color
+      <select id="color-mode">
+        <option value="0">Original</option>
+        <option value="1">Grayscale</option>
+        <option value="2">Black &amp; white</option>
+        <option value="3">Green</option>
+      </select>
+      <span></span>
+    </label>
+    <p style="margin:10px 0 0;color:var(--muted);font-size:11px;">Decode: <a href="https://github.com/3dgscloud/GaussForge" target="_blank" rel="noopener">GaussForge</a></p>
+  </aside>
+  <div id="hint">Drag PLY / SPLAT / SPZ / KSPLAT / SOG · orbit LMB · pan RMB · scroll zoom</div>
+  <div id="overlay" class="hidden"></div>
+  <div id="unsupported" class="hidden">
+    <div class="card">
+      <h1>WebGPU required</h1>
+      <p id="unsupported-msg">This viewer needs a browser with WebGPU enabled (Chrome 113+, Edge 113+, or recent Firefox).</p>
+      <p>You can still use the WebGL viewers:
+        <a href="../gaussian_splatting_1/index.html">Viewer 1</a> ·
+        <a href="../gaussian_splatting_2_three.js/index.html">Viewer 2</a> ·
+        <a href="../gaussian_splatting_2_aframe/index.html">A-Frame</a>
+      </p>
+    </div>
+  </div>
+  <script type="module" src="main.js"></script>
+  <script>
+    document.querySelectorAll("label input[type=range]").forEach((input) => {
+      const val = input.parentElement.querySelector(".val");
+      const sync = () => { if (val) val.textContent = input.value; };
+      input.addEventListener("input", sync);
+      sync();
+    });
+  </script>
+</body>
+</html>
