@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PORT="${PORT:-8090}"
 PROFILE="${CHROME_PROFILE:-$HOME/.cache/chrome-webgpu-3dgs}"
-URL="${1:-http://127.0.0.1:${PORT}/gaussian_splatting_webgpu/}"
+URL="${1:-http://127.0.0.1:${PORT}/gaussian_splatting_webgpu/?url=../splats/model.splat}"
 
 mkdir -p "$PROFILE"
 

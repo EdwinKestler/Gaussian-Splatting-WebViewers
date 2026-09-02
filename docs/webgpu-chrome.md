@@ -20,8 +20,10 @@ http://127.0.0.1:8090/gaussian_splatting_webgpu/
 Load a local file with a query:
 
 ```text
-http://127.0.0.1:8090/gaussian_splatting_webgpu/?url=./demo.ply
+http://127.0.0.1:8090/gaussian_splatting_webgpu/?url=../splats/model.splat
 ```
+
+The default scene is `splats/model.splat` (compact 32-byte SH0). `demo.ply` is a tiny SH0 sphere (Demo PLY button). For the full Kerbl / INRIA radiance field, drop a trained `point_cloud/iteration_*/point_cloud.ply` (it must contain `f_rest_*` spherical-harmonic bands). Compact `.splat` files cannot reconstruct SH1–3. Leave **Point cloud debug** unchecked.
 
 ## 2. Launch Chrome with WebGPU
 
@@ -42,7 +44,7 @@ google-chrome \
   --enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE \
   --use-angle=vulkan \
   --new-window \
-  'http://127.0.0.1:8090/gaussian_splatting_webgpu/?url=./demo.ply'
+  'http://127.0.0.1:8090/gaussian_splatting_webgpu/?url=../splats/model.splat'
 ```
 
 One-liner from this repo (starts the server if needed):
@@ -56,7 +58,7 @@ Optional:
 ```bash
 PORT=8090 CHROME_PROFILE=$HOME/.cache/chrome-webgpu-3dgs \
   ./gaussian_splatting_webgpu/launch-webgpu-chrome.sh \
-  'http://127.0.0.1:8090/gaussian_splatting_webgpu/?url=./demo.ply'
+  'http://127.0.0.1:8090/gaussian_splatting_webgpu/?url=../splats/model.splat'
 ```
 
 ## 3. Confirm WebGPU is on

@@ -394,3 +394,207 @@ export function packedToPly(packed) {
   out.set(new Uint8Array(body), headerBytes.length);
   return out;
 }
+
+/** 12 floats: xyz, opacity, scale xyz, pad, quat wxyz */
+export const GAUSSIAN_STRIDE = 12;
+/** 16 RGB coefficients, tightly packed (48 floats). */
+export const SH_STRIDE = 48;
+
+export function boundsFromGaussians(gaussians) {
+  const count = gaussians.length / GAUSSIAN_STRIDE;
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  const xs = new Float32Array(count);
+  const ys = new Float32Array(count);
+  const zs = new Float32Array(count);
+  for (let i = 0; i < count; i++) {
+    const x = gaussians[i * 12], y = gaussians[i * 12 + 1], z = gaussians[i * 12 + 2];
+    xs[i] = x; ys[i] = y; zs[i] = z;
+    if (x < minX) minX = x; if (x > maxX) maxX = x;
+    if (y < minY) minY = y; if (y > maxY) maxY = y;
+    if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+  }
+  if (!Number.isFinite(minX)) {
+    minX = minY = minZ = -1;
+    maxX = maxY = maxZ = 1;
+  }
+  const pct = (arr, t) => {
+    arr.sort();
+    const i = Math.min(arr.length - 1, Math.max(0, Math.floor(t * (arr.length - 1))));
+    return arr[i];
+  };
+  let fminX = minX, fminY = minY, fminZ = minZ;
+  let fmaxX = maxX, fmaxY = maxY, fmaxZ = maxZ;
+  if (count >= 32) {
+    fminX = pct(xs, 0.05); fmaxX = pct(xs, 0.95);
+    fminY = pct(ys, 0.05); fmaxY = pct(ys, 0.95);
+    fminZ = pct(zs, 0.05); fmaxZ = pct(zs, 0.95);
+  }
+  return {
+    min: [minX, minY, minZ],
+    max: [maxX, maxY, maxZ],
+    center: [(fminX + fmaxX) / 2, (fminY + fmaxY) / 2, (fminZ + fmaxZ) / 2],
+    radius: Math.max(fmaxX - fminX, fmaxY - fminY, fmaxZ - fminZ) * 0.5 || 1,
+  };
+}
+
+function packedToCloud(packed) {
+  const n = packed.byteLength / SPLAT32_ROW;
+  const srcF = new Float32Array(packed.buffer, packed.byteOffset, packed.byteLength / 4);
+  const gaussians = new Float32Array(n * GAUSSIAN_STRIDE);
+  const sh = new Float32Array(n * SH_STRIDE);
+  for (let i = 0; i < n; i++) {
+    const sf = i * 8;
+    const sb = i * SPLAT32_ROW;
+    const g = i * 12;
+    gaussians[g] = srcF[sf];
+    gaussians[g + 1] = srcF[sf + 1];
+    gaussians[g + 2] = srcF[sf + 2];
+    gaussians[g + 3] = packed[sb + 27] / 255;
+    gaussians[g + 4] = srcF[sf + 3];
+    gaussians[g + 5] = srcF[sf + 4];
+    gaussians[g + 6] = srcF[sf + 5];
+    const qw = (packed[sb + 28] - 128) / 128;
+    const qx = (packed[sb + 29] - 128) / 128;
+    const qy = (packed[sb + 30] - 128) / 128;
+    const qz = (packed[sb + 31] - 128) / 128;
+    const qn = Math.hypot(qw, qx, qy, qz) || 1;
+    gaussians[g + 8] = qw / qn;
+    gaussians[g + 9] = qx / qn;
+    gaussians[g + 10] = qy / qn;
+    gaussians[g + 11] = qz / qn;
+    const s = i * SH_STRIDE;
+    sh[s] = (packed[sb + 24] / 255 - 0.5) / SH_C0;
+    sh[s + 1] = (packed[sb + 25] / 255 - 0.5) / SH_C0;
+    sh[s + 2] = (packed[sb + 26] / 255 - 0.5) / SH_C0;
+  }
+  return {
+    gaussians,
+    sh,
+    shDegree: 0,
+    count: n,
+    bounds: boundsFromGaussians(gaussians),
+    format: "splat32",
+  };
+}
+
+function plyToCloud(buffer) {
+  const { format, vertexCount, properties, headerEnd } = decodePlyHeader(buffer);
+  const fieldSize = properties.map((p) => TYPE_SIZE[p.type] || 4);
+  const rowSize = fieldSize.reduce((a, b) => a + b, 0);
+  const offsets = {};
+  const types = {};
+  let acc = 0;
+  for (const p of properties) {
+    offsets[p.name] = acc;
+    types[p.name] = p.type;
+    acc += TYPE_SIZE[p.type] || 4;
+  }
+  const has = (name) => Object.prototype.hasOwnProperty.call(offsets, name);
+
+  let nRest = 0;
+  while (has(`f_rest_${nRest}`)) nRest += 1;
+  const nCoeffsPerColor = nRest / 3;
+  let shDegree = 0;
+  if (nCoeffsPerColor >= 15) shDegree = 3;
+  else if (nCoeffsPerColor >= 8) shDegree = 2;
+  else if (nCoeffsPerColor >= 3) shDegree = 1;
+
+  const gaussians = new Float32Array(vertexCount * GAUSSIAN_STRIDE);
+  const sh = new Float32Array(vertexCount * SH_STRIDE);
+
+  const fill = (i, get) => {
+    const g = i * 12;
+    gaussians[g] = get("x");
+    gaussians[g + 1] = get("y");
+    gaussians[g + 2] = get("z");
+    gaussians[g + 3] = has("opacity") ? sigmoid(get("opacity")) : 1;
+    if (has("scale_0")) {
+      gaussians[g + 4] = Math.exp(get("scale_0"));
+      gaussians[g + 5] = Math.exp(get("scale_1"));
+      gaussians[g + 6] = Math.exp(get("scale_2"));
+    } else {
+      gaussians[g + 4] = gaussians[g + 5] = gaussians[g + 6] = 0.01;
+    }
+    if (has("rot_0")) {
+      const qw = get("rot_0");
+      const qx = get("rot_1");
+      const qy = get("rot_2");
+      const qz = get("rot_3");
+      const qn = Math.hypot(qw, qx, qy, qz) || 1;
+      gaussians[g + 8] = qw / qn;
+      gaussians[g + 9] = qx / qn;
+      gaussians[g + 10] = qy / qn;
+      gaussians[g + 11] = qz / qn;
+    } else {
+      gaussians[g + 8] = 1;
+    }
+    const s = i * SH_STRIDE;
+    if (has("f_dc_0")) {
+      sh[s] = get("f_dc_0");
+      sh[s + 1] = get("f_dc_1");
+      sh[s + 2] = get("f_dc_2");
+    } else if (has("red")) {
+      let r = get("red");
+      let gch = get("green");
+      let b = get("blue");
+      if (r > 1 || gch > 1 || b > 1) {
+        r /= 255;
+        gch /= 255;
+        b /= 255;
+      }
+      sh[s] = (r - 0.5) / SH_C0;
+      sh[s + 1] = (gch - 0.5) / SH_C0;
+      sh[s + 2] = (b - 0.5) / SH_C0;
+    }
+    const maxK = Math.min(15, nCoeffsPerColor | 0);
+    for (let k = 0; k < maxK; k++) {
+      sh[s + 3 + k * 3] = get(`f_rest_${k}`);
+      sh[s + 4 + k * 3] = get(`f_rest_${nCoeffsPerColor + k}`);
+      sh[s + 5 + k * 3] = get(`f_rest_${2 * nCoeffsPerColor + k}`);
+    }
+  };
+
+  if (format === "ascii") {
+    const text = new TextDecoder().decode(new Uint8Array(buffer, headerEnd));
+    const lines = text.split(/\r?\n/).filter((l) => l.trim().length);
+    const names = properties.map((p) => p.name);
+    for (let i = 0; i < vertexCount; i++) {
+      const parts = lines[i].trim().split(/\s+/);
+      const rec = {};
+      for (let p = 0; p < names.length; p++) rec[names[p]] = parseFloat(parts[p]);
+      fill(i, (name) => (rec[name] !== undefined && rec[name] !== null ? rec[name] : 0));
+    }
+  } else {
+    const le = format === "binary_le";
+    const view = new DataView(buffer, headerEnd);
+    for (let i = 0; i < vertexCount; i++) {
+      const base = i * rowSize;
+      fill(i, (name) =>
+        has(name) ? readNumeric(view, base + offsets[name], types[name], le) : 0
+      );
+    }
+  }
+
+  return {
+    gaussians,
+    sh,
+    shDegree,
+    count: vertexCount,
+    bounds: boundsFromGaussians(gaussians),
+    format: "ply",
+  };
+}
+
+/**
+ * Full-precision 3DGS cloud: float covariance + SH0–3.
+ * Compact .splat files only recover SH degree 0.
+ */
+export function toGaussianCloud(buffer, filename = "") {
+  const fmt = detectFormat(buffer, filename);
+  if (fmt === "ply") return plyToCloud(buffer);
+  const packed = fmt === "splat44" ? splat44ToPacked(buffer) : splat32ToPacked(buffer);
+  const cloud = packedToCloud(packed);
+  cloud.format = fmt;
+  return cloud;
+}

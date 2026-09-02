@@ -59,15 +59,15 @@
     <h1>Gaussian Splatting Web Viewers</h1>
     <p class="lede">
       Browser viewers for 3D Gaussian Splatting. The WebGPU viewer is the recommended path:
-      it loads <code>.ply</code> and both <code>.splat</code> layouts, sorts on the GPU, and
-      renders with a full 3DGS ellipse pipeline. The original Three.js and A-Frame demos are
-      kept as WebGL fallbacks.
+      it loads a trained INRIA <code>point_cloud.ply</code> (float covariance + SH0–3) and
+      rasterizes the Kerbl et al. radiance field on the GPU. Compact <code>.splat</code> files
+      are SH0 previews. The original Three.js and A-Frame demos are kept as WebGL fallbacks.
     </p>
     <div class="grid">
       <a class="card" href="gaussian_splatting_webgpu/index.html">
         <div class="tag">Recommended</div>
         <h2>WebGPU viewer</h2>
-        <p>Load PLY or SPLAT, GPU counting sort, color grading, drag-and-drop, and a built-in demo scene.</p>
+        <p>Full 3DGS: trained PLY with SH3, GPU sort, EWA ellipses. Drop point_cloud.ply from graphdeco-inria.</p>
       </a>
       <a class="card" href="gaussian_splatting_1/index.html">
         <div class="tag">WebGL · Three.js</div>

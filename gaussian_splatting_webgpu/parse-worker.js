@@ -1,8 +1,7 @@
-import { toSplat32 } from "../shared/splat-io.js";
+import { toGaussianCloud, boundsFromGaussians } from "../shared/splat-io.js";
 
 const GAUSSFORGE_URL =
   "https://cdn.jsdelivr.net/npm/@gaussforge/wasm@0.6.0/dist/index.web.js";
-const SH_C0 = 0.28209479177387814;
 
 let forge = null;
 let forgeTried = false;
@@ -12,56 +11,19 @@ function sigmoid(x) {
   return 1 / (1 + Math.exp(-Math.max(-40, Math.min(40, x))));
 }
 
-function clampByte(v) {
-  return Math.max(0, Math.min(255, v | 0));
-}
-
-function packQuatU8(out, offset, w, x, y, z) {
-  const n = Math.hypot(w, x, y, z) || 1;
-  out[offset] = clampByte(Math.round((w / n) * 128 + 128));
-  out[offset + 1] = clampByte(Math.round((x / n) * 128 + 128));
-  out[offset + 2] = clampByte(Math.round((y / n) * 128 + 128));
-  out[offset + 3] = clampByte(Math.round((z / n) * 128 + 128));
-}
-
-function boundsFromPacked(packed) {
-  const f = new Float32Array(packed.buffer, packed.byteOffset, packed.byteLength / 4);
-  const count = packed.byteLength / 32;
-  let minX = Infinity, minY = Infinity, minZ = Infinity;
-  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-  for (let i = 0; i < count; i++) {
-    const o = i * 8;
-    const x = f[o], y = f[o + 1], z = f[o + 2];
-    if (x < minX) minX = x; if (x > maxX) maxX = x;
-    if (y < minY) minY = y; if (y > maxY) maxY = y;
-    if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
-  }
-  if (!Number.isFinite(minX)) {
-    minX = minY = minZ = -1;
-    maxX = maxY = maxZ = 1;
-  }
-  return {
-    min: [minX, minY, minZ],
-    max: [maxX, maxY, maxZ],
-    center: [(minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2],
-    radius: Math.max(maxX - minX, maxY - minY, maxZ - minZ) * 0.5 || 1,
-  };
-}
-
-function downsample(packed, sh1, compression) {
+function downsampleCloud(gaussians, sh, compression) {
   const factor = Math.max(1, Math.min(10, compression | 0 || 1));
-  if (factor === 1) return { packed, sh1 };
-  const count = packed.byteLength / 32;
+  const count = gaussians.length / 12;
+  if (factor === 1) return { gaussians, sh, count };
   const keep = Math.max(1, Math.floor(count / factor));
-  const out = new Uint8Array(keep * 32);
-  let outSh = null;
-  if (sh1 && sh1.length >= count * 9) outSh = new Float32Array(keep * 9);
+  const outG = new Float32Array(keep * 12);
+  const outSh = new Float32Array(keep * 48);
   for (let i = 0; i < keep; i++) {
     const src = Math.floor((i * count) / keep);
-    out.set(packed.subarray(src * 32, src * 32 + 32), i * 32);
-    if (outSh) outSh.set(sh1.subarray(src * 9, src * 9 + 9), i * 9);
+    outG.set(gaussians.subarray(src * 12, src * 12 + 12), i * 12);
+    outSh.set(sh.subarray(src * 48, src * 48 + 48), i * 48);
   }
-  return { packed: out, sh1: outSh };
+  return { gaussians: outG, sh: outSh, count: keep };
 }
 
 function detectGaussFormat(buffer, filename = "") {
@@ -80,40 +42,66 @@ function detectGaussFormat(buffer, filename = "") {
   return "ply";
 }
 
-function irToPacked(ir) {
+function shDegreeFromIr(ir) {
   const n = ir.numPoints | 0;
-  const packed = new Uint8Array(n * 32);
-  const f = new Float32Array(packed.buffer);
+  const metaDeg = (ir.meta && ir.meta.shDegree) || 0;
+  const rest = ir.sh && ir.sh.length ? ir.sh.length : 0;
+  const per = n ? rest / n : 0;
+  const fromLen = per >= 45 ? 3 : per >= 24 ? 2 : per >= 9 ? 1 : 0;
+  return Math.min(3, Math.max(metaDeg, fromLen));
+}
+
+function irToCloud(ir) {
+  const n = ir.numPoints | 0;
+  const gaussians = new Float32Array(n * 12);
+  const sh = new Float32Array(n * 48);
   const pos = ir.positions;
   const scl = ir.scales;
   const rot = ir.rotations;
   const alp = ir.alphas;
   const col = ir.colors;
+  const rest = ir.sh;
+  const degree = shDegreeFromIr(ir);
+  const restStride = degree > 0 ? ((degree + 1) * (degree + 1) - 1) * 3 : 0;
   for (let i = 0; i < n; i++) {
-    const df = i * 8;
-    const db = i * 32;
-    f[df] = pos[i * 3];
-    f[df + 1] = pos[i * 3 + 1];
-    f[df + 2] = pos[i * 3 + 2];
-    f[df + 3] = Math.exp(scl[i * 3]);
-    f[df + 4] = Math.exp(scl[i * 3 + 1]);
-    f[df + 5] = Math.exp(scl[i * 3 + 2]);
-    packed[db + 24] = clampByte((0.5 + SH_C0 * col[i * 3]) * 255);
-    packed[db + 25] = clampByte((0.5 + SH_C0 * col[i * 3 + 1]) * 255);
-    packed[db + 26] = clampByte((0.5 + SH_C0 * col[i * 3 + 2]) * 255);
-    packed[db + 27] = clampByte(sigmoid(alp[i]) * 255);
-    packQuatU8(packed, db + 28, rot[i * 4], rot[i * 4 + 1], rot[i * 4 + 2], rot[i * 4 + 3]);
-  }
-  let sh1 = null;
-  const degree = (ir.meta && ir.meta.shDegree) || 0;
-  if (degree >= 1 && ir.sh && ir.sh.length >= n * 9) {
-    sh1 = new Float32Array(n * 9);
-    const stride = ((degree + 1) * (degree + 1) - 1) * 3;
-    for (let i = 0; i < n; i++) {
-      sh1.set(ir.sh.subarray(i * stride, i * stride + 9), i * 9);
+    const g = i * 12;
+    gaussians[g] = pos[i * 3];
+    gaussians[g + 1] = pos[i * 3 + 1];
+    gaussians[g + 2] = pos[i * 3 + 2];
+    gaussians[g + 3] = sigmoid(alp[i]);
+    gaussians[g + 4] = Math.exp(scl[i * 3]);
+    gaussians[g + 5] = Math.exp(scl[i * 3 + 1]);
+    gaussians[g + 6] = Math.exp(scl[i * 3 + 2]);
+    const qw = rot[i * 4], qx = rot[i * 4 + 1], qy = rot[i * 4 + 2], qz = rot[i * 4 + 3];
+    const qn = Math.hypot(qw, qx, qy, qz) || 1;
+    gaussians[g + 8] = qw / qn;
+    gaussians[g + 9] = qx / qn;
+    gaussians[g + 10] = qy / qn;
+    gaussians[g + 11] = qz / qn;
+    const s = i * 48;
+    sh[s] = col[i * 3];
+    sh[s + 1] = col[i * 3 + 1];
+    sh[s + 2] = col[i * 3 + 2];
+    if (restStride && rest && rest.length >= (i + 1) * restStride) {
+      sh.set(rest.subarray(i * restStride, i * restStride + Math.min(restStride, 45)), s + 3);
     }
   }
-  return { packed, sh1, shDegree: degree };
+  return { gaussians, sh, shDegree: degree, count: n };
+}
+
+function finishCloud(cloud, extra) {
+  const reduced = downsampleCloud(cloud.gaussians, cloud.sh, extra.compression);
+  return {
+    decoder: extra.decoder,
+    format: extra.format,
+    shDegree: cloud.shDegree,
+    count: reduced.count,
+    gaussians: reduced.gaussians,
+    sh: reduced.sh,
+    bounds: boundsFromGaussians(reduced.gaussians),
+    warning: extra.warning || "",
+    version: extra.version || "",
+  };
 }
 
 async function getForge() {
@@ -135,34 +123,22 @@ async function decodeWithForge(buffer, name, compression) {
   if (result.error) throw new Error(result.error);
   const ir = result.data;
   if (!ir || !ir.numPoints) throw new Error("GaussForge returned an empty cloud");
-  const packedFull = irToPacked(ir);
-  const reduced = downsample(packedFull.packed, packedFull.sh1, compression);
-  return {
+  return finishCloud(irToCloud(ir), {
     decoder: "gaussforge",
     format,
-    shDegree: packedFull.shDegree,
-    count: reduced.packed.byteLength / 32,
-    packed: reduced.packed,
-    sh1: reduced.sh1,
-    bounds: boundsFromPacked(reduced.packed),
+    compression,
     warning: result.warning || "",
     version: gf.getVersion ? gf.getVersion() : "",
-  };
+  });
 }
 
 function decodeFallback(buffer, name, compression) {
-  const result = toSplat32(buffer, name, { compression: compression || 1 });
-  return {
+  const cloud = toGaussianCloud(buffer, name);
+  return finishCloud(cloud, {
     decoder: "builtin",
-    format: result.format,
-    shDegree: 0,
-    count: result.count,
-    packed: result.packed,
-    sh1: null,
-    bounds: result.bounds,
-    warning: "",
-    version: "",
-  };
+    format: cloud.format,
+    compression,
+  });
 }
 
 self.onmessage = async (event) => {
@@ -199,8 +175,7 @@ self.onmessage = async (event) => {
       decoded = decodeFallback(data.buffer, data.name || "", data.compression || 1);
       decoded.warning = `GaussForge: ${forgeErr.message || forgeErr}; used built-in decoder`;
     }
-    const transfer = [decoded.packed.buffer];
-    if (decoded.sh1) transfer.push(decoded.sh1.buffer);
+    const transfer = [decoded.gaussians.buffer, decoded.sh.buffer];
     self.postMessage({ id, ok: true, ...decoded }, transfer);
   } catch (err) {
     self.postMessage({

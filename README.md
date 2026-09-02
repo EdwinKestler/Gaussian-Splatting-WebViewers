@@ -11,7 +11,7 @@ cd Gaussian-Splatting-WebViewers
 python3 -m http.server 8090 --bind 127.0.0.1
 ```
 
-Then open [http://127.0.0.1:8090/](http://127.0.0.1:8090/) or the WebGPU viewer at [http://127.0.0.1:8090/gaussian_splatting_webgpu/](http://127.0.0.1:8090/gaussian_splatting_webgpu/).
+Then open [http://127.0.0.1:8090/](http://127.0.0.1:8090/) or the WebGPU viewer at [http://127.0.0.1:8090/gaussian_splatting_webgpu/?url=../splats/model.splat](http://127.0.0.1:8090/gaussian_splatting_webgpu/?url=../splats/model.splat). Default scene is `splats/model.splat`. Pipeline notes: [docs/pipeline.md](docs/pipeline.md). Paper (flowchart, references, attributions): [docs/open-vocab-3dgs-imagine-pipeline-paper.md](docs/open-vocab-3dgs-imagine-pipeline-paper.md) · [PDF](docs/open-vocab-3dgs-imagine-pipeline-paper.pdf).
 
 ### WebGPU Chrome (Linux / Vulkan)
 
@@ -30,7 +30,7 @@ google-chrome \
   --enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE \
   --use-angle=vulkan \
   --new-window \
-  'http://127.0.0.1:8090/gaussian_splatting_webgpu/?url=./demo.ply'
+  'http://127.0.0.1:8090/gaussian_splatting_webgpu/?url=../splats/model.splat'
 ```
 
 Or:
@@ -57,27 +57,36 @@ Every viewer accepts `?url=` pointing at a scene file, and every WebGL/WebGPU vi
 
 ## File formats
 
-There are two `.splat` layouts in the wild. They are **not interchangeable**.
+There are two `.splat` layouts in the wild. They are **not interchangeable**, and **neither is the full 3DGS radiance field**.
 
 | Layout | Bytes / gaussian | Contents | Used by |
 | --- | --- | --- | --- |
-| Compact | 32 | `xyz f32`, `scale f32`, `RGBA u8`, `quat u8` | Viewer 1, converter default, antimatter15/splat, WebGPU viewer |
+| Compact | 32 | `xyz f32`, `scale f32`, `RGBA u8`, `quat u8` | Viewer 1, converter default, antimatter15/splat |
 | Extended | 44 | `xyz f32`, `scale f32`, `RGBA u8`, `quat f32` | Original Viewer 2 |
+| INRIA PLY | ~236 (SH3) | float mean, log-scale, quat, logit opacity, SH DC + `f_rest_0…44` | [graphdeco-inria/gaussian-splatting](https://github.com/graphdeco-inria/gaussian-splatting) `point_cloud/iteration_*/point_cloud.ply` |
 
-INRIA training output is `.ply` (`x,y,z`, log-scale, quaternion, SH DC, logit opacity). Shared parser: `shared/splat-io.js`. It detects the format, importance-sorts PLY gaussians, and emits compact 32-byte rows.
+A compact `.splat` has **already thrown away** spherical harmonics 1–3 and quantized rotations to 8 bits. Loading it can only show a view-independent approximation (or a point cloud if that debug toggle is on). For the paper’s radiance field, drop a trained **`point_cloud.ply`**.
+
+Shared parser: `shared/splat-io.js`. WebGL viewers still pack to 32-byte rows. The WebGPU viewer keeps float covariance + SH0–3.
 
 ## WebGPU 3DGS viewer
 
-`gaussian_splatting_webgpu/` is the recommended renderer. Format decoding uses **[GaussForge](https://github.com/3dgscloud/GaussForge)** (`@gaussforge/wasm`) — the same conversion IR as [3DGS Viewer](https://www.3dgsviewers.com/) — then a WebGPU compute sort + ellipse rasterizer.
+`gaussian_splatting_webgpu/` is the recommended renderer. Format decoding uses **[GaussForge](https://github.com/3dgscloud/GaussForge)** (`@gaussforge/wasm`) — the same conversion IR as [3DGS Viewer](https://www.3dgsviewers.com/) — then a WebGPU compute sort + the [Kerbl et al. / INRIA](https://github.com/graphdeco-inria/gaussian-splatting) rasterizer.
 
 - Loads **PLY**, **compressed PLY**, **SPLAT**, **KSPLAT**, **SPZ**, and **SOG**
-- GaussForge IR: log-scale, pre-sigmoid opacity, SH DC, quaternion `wxyz`
-- View-dependent **SH degree 1** when rest coefficients are present
+- Keeps **float** scale / quaternion / opacity (no 8-bit packing on the GPU path)
+- View-dependent **SH degree 0–3** (`computeColorFromSH` from `diff-gaussian-rasterization`)
+- Paper EWA projection, 3-sigma extent, fragment `α = o · exp(-½ r²)`, front-to-back transmittance
 - GPU 16-bit counting sort every frame (histogram + prefix sum + scatter)
+- HUD warns when the file is compact `.splat` / SH0 so it cannot match the official viewer
 - Export back through GaussForge (PLY / SPLAT / SPZ / KSPLAT / SOG)
-- Falls back to `shared/splat-io.js` if WASM cannot load
+- Falls back to `shared/splat-io.js` (`toGaussianCloud`) if WASM cannot load
+
+**Point cloud debug** is a diagnostic overlay. Leave it unchecked for the radiance-field rendering.
 
 Requires Chrome 113+, Edge 113+, or another browser with WebGPU. If WebGPU is missing, the page links back to the WebGL viewers. Launch instructions: [docs/webgpu-chrome.md](docs/webgpu-chrome.md).
+
+Optional **open-vocab tags** and **Imagine 2.0 object cards**: start `./semantic_sidecar/launch.sh` (reads `XAI_API_KEY` from `.env`, port 8766), then use **Tag scene (Grok)** in the WebGPU HUD. Tags run on captured 3DGS rasters; Imagine only edits those crops. ArtiFixer is a separate local-GPU stage (see `semantic_sidecar/README.md`).
 
 ## A-Frame component
 

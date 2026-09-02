@@ -1,19 +1,20 @@
 /**
- * WebGPU Gaussian splat renderer.
+ * WebGPU 3D Gaussian Splatting rasterizer (Kerbl / graphdeco-inria).
  *
  * Each frame:
- *   1. Compute view-space depths + min/max
- *   2. Quantize 16-bit keys
+ *   1. View-space depths + min/max
+ *   2. Quantize 16-bit keys (near → 0 so we draw front-to-back)
  *   3. Histogram + GPU exclusive prefix sum
- *   4. Scatter sorted indices (far → near)
- *   5. Instanced ellipse rasterization with premultiplied alpha
+ *   4. Scatter sorted indices
+ *   5. Instanced EWA ellipses, paper SH0–3, α = o · exp(-½ r²)
  */
 
 const WG = 256;
 const HIST_BINS = 65536;
 const HIST_BLOCKS = HIST_BINS / WG;
-
-const UNIFORM_FLOATS = 64; // 256 bytes, 16-byte aligned
+const UNIFORM_FLOATS = 64;
+const GAUSSIAN_FLOATS = 12;
+const SH_FLOATS = 48;
 
 const SORT_SHADER = /* wgsl */ `
 struct SortUniforms {
@@ -24,8 +25,14 @@ struct SortUniforms {
   _pad2: u32,
 };
 
+struct Gaussian {
+  pos_opacity: vec4<f32>,
+  scale: vec4<f32>,
+  quat: vec4<f32>,
+};
+
 @group(0) @binding(0) var<uniform> su: SortUniforms;
-@group(0) @binding(1) var<storage, read> splats: array<u32>;
+@group(0) @binding(1) var<storage, read> gaussians: array<Gaussian>;
 @group(0) @binding(2) var<storage, read_write> depths: array<f32>;
 @group(0) @binding(3) var<storage, read_write> keys: array<u32>;
 @group(0) @binding(4) var<storage, read_write> minmax: array<atomic<u32>>;
@@ -48,13 +55,7 @@ fn sortable_to_f32(u: u32) -> f32 {
 fn compute_depth(@builtin(global_invocation_id) gid: vec3u) {
   let i = gid.x;
   if (i >= su.count) { return; }
-  let base = i * 8u;
-  let p = vec4<f32>(
-    bitcast<f32>(splats[base + 0u]),
-    bitcast<f32>(splats[base + 1u]),
-    bitcast<f32>(splats[base + 2u]),
-    1.0
-  );
+  let p = vec4<f32>(gaussians[i].pos_opacity.xyz, 1.0);
   let cam = su.view * p;
   let dist = -cam.z;
   depths[i] = dist;
@@ -70,8 +71,8 @@ fn compute_keys(@builtin(global_invocation_id) gid: vec3u) {
   let max_d = sortable_to_f32(atomicLoad(&minmax[1]));
   let span = max(max_d - min_d, 1e-6);
   let t = clamp((depths[i] - min_d) / span, 0.0, 1.0);
-  // Far (t=1) → key 0 so ascending sort draws back-to-front.
-  keys[i] = u32((1.0 - t) * 65535.0);
+  // Near (t=0) → key 0 so ascending sort draws front-to-back (INRIA T compositing).
+  keys[i] = u32(t * 65535.0);
 }
 
 @compute @workgroup_size(${WG})
@@ -173,10 +174,16 @@ struct Uniforms {
   camera_pos: vec4<f32>,
 };
 
+struct Gaussian {
+  pos_opacity: vec4<f32>,
+  scale: vec4<f32>,
+  quat: vec4<f32>,
+};
+
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
-@group(0) @binding(1) var<storage, read> splats: array<u32>;
+@group(0) @binding(1) var<storage, read> gaussians: array<Gaussian>;
 @group(0) @binding(2) var<storage, read> sorted_indices: array<u32>;
-@group(0) @binding(3) var<storage, read> sh_rest: array<f32>;
+@group(0) @binding(3) var<storage, read> sh_coeffs: array<f32>;
 
 struct VSIn {
   @location(0) quad_pos: vec2<f32>,
@@ -190,155 +197,192 @@ struct VSOut {
   @location(2) v_mode: f32,
 };
 
+const SH_C0: f32 = 0.28209479177387814;
+const SH_C1: f32 = 0.4886025119029199;
+const SH_C2_0: f32 = 1.0925484305920792;
+const SH_C2_1: f32 = -1.0925484305920792;
+const SH_C2_2: f32 = 0.31539156525252005;
+const SH_C2_3: f32 = -1.0925484305920792;
+const SH_C2_4: f32 = 0.5462742152960396;
+const SH_C3_0: f32 = -0.5900435899266435;
+const SH_C3_1: f32 = 2.890611442640554;
+const SH_C3_2: f32 = -0.4570457994644658;
+const SH_C3_3: f32 = 0.3731763325901154;
+const SH_C3_4: f32 = -0.4570457994644658;
+const SH_C3_5: f32 = 1.445305721320277;
+const SH_C3_6: f32 = -0.5900435899266435;
+
+fn sh_band(base: u32, k: u32) -> vec3<f32> {
+  let o = base + k * 3u;
+  return vec3<f32>(sh_coeffs[o], sh_coeffs[o + 1u], sh_coeffs[o + 2u]);
+}
+
+fn eval_sh(index: u32, dir: vec3<f32>, degree: i32) -> vec3<f32> {
+  let base = index * 48u;
+  var result = SH_C0 * sh_band(base, 0u);
+  if (degree > 0) {
+    let x = dir.x;
+    let y = dir.y;
+    let z = dir.z;
+    result = result
+      - SH_C1 * y * sh_band(base, 1u)
+      + SH_C1 * z * sh_band(base, 2u)
+      - SH_C1 * x * sh_band(base, 3u);
+    if (degree > 1) {
+      let xx = x * x;
+      let yy = y * y;
+      let zz = z * z;
+      let xy = x * y;
+      let yz = y * z;
+      let xz = x * z;
+      result = result
+        + SH_C2_0 * xy * sh_band(base, 4u)
+        + SH_C2_1 * yz * sh_band(base, 5u)
+        + SH_C2_2 * (2.0 * zz - xx - yy) * sh_band(base, 6u)
+        + SH_C2_3 * xz * sh_band(base, 7u)
+        + SH_C2_4 * (xx - yy) * sh_band(base, 8u);
+      if (degree > 2) {
+        result = result
+          + SH_C3_0 * y * (3.0 * xx - yy) * sh_band(base, 9u)
+          + SH_C3_1 * xy * z * sh_band(base, 10u)
+          + SH_C3_2 * y * (4.0 * zz - xx - yy) * sh_band(base, 11u)
+          + SH_C3_3 * z * (2.0 * zz - 3.0 * xx - 3.0 * yy) * sh_band(base, 12u)
+          + SH_C3_4 * x * (4.0 * zz - xx - yy) * sh_band(base, 13u)
+          + SH_C3_5 * z * (xx - yy) * sh_band(base, 14u)
+          + SH_C3_6 * x * (xx - 3.0 * yy) * sh_band(base, 15u);
+      }
+    }
+  }
+  return max(result + 0.5, vec3<f32>(0.0));
+}
+
+fn cov3d_from_quat(q: vec4<f32>, scale: vec3<f32>) -> mat3x3<f32> {
+  let w = q.x;
+  let x = q.y;
+  let y = q.z;
+  let z = q.w;
+  let r00 = 1.0 - 2.0 * (y * y + z * z);
+  let r10 = 2.0 * (x * y + w * z);
+  let r20 = 2.0 * (x * z - w * y);
+  let r01 = 2.0 * (x * y - w * z);
+  let r11 = 1.0 - 2.0 * (x * x + z * z);
+  let r21 = 2.0 * (y * z + w * x);
+  let r02 = 2.0 * (x * z + w * y);
+  let r12 = 2.0 * (y * z - w * x);
+  let r22 = 1.0 - 2.0 * (x * x + y * y);
+  let m = mat3x3<f32>(
+    vec3<f32>(r00, r10, r20) * scale.x,
+    vec3<f32>(r01, r11, r21) * scale.y,
+    vec3<f32>(r02, r12, r22) * scale.z
+  );
+  return m * transpose(m);
+}
+
+fn empty_vertex(mode: f32) -> VSOut {
+  var out: VSOut;
+  out.position = vec4<f32>(0.0, 0.0, 2.0, 1.0);
+  out.v_color = vec4<f32>(0.0);
+  out.v_position = vec2<f32>(0.0);
+  out.v_mode = mode;
+  return out;
+}
+
 @vertex
 fn vs_main(input: VSIn) -> VSOut {
   let index = sorted_indices[input.instance_id];
-  let base = index * 8u;
-  let center = vec3<f32>(
-    bitcast<f32>(splats[base + 0u]),
-    bitcast<f32>(splats[base + 1u]),
-    bitcast<f32>(splats[base + 2u]),
-  );
-  let scale = vec3<f32>(
-    bitcast<f32>(splats[base + 3u]),
-    bitcast<f32>(splats[base + 4u]),
-    bitcast<f32>(splats[base + 5u]),
-  );
+  let g = gaussians[index];
+  let center = g.pos_opacity.xyz;
+  let opacity = g.pos_opacity.w;
+  let splat_scale = max(uniforms.render_params.w, 0.0);
+  let scale = g.scale.xyz * splat_scale;
+  let quat = g.quat;
+  let point_mode = uniforms.render_params.x;
 
-  let cam = uniforms.view * vec4<f32>(center, 1.0);
-  let pos2d = uniforms.projection * cam;
+  let cam4 = uniforms.view * vec4<f32>(center, 1.0);
+  let cam = cam4.xyz;
+  let pos2d = uniforms.projection * cam4;
   let clip = 1.2 * pos2d.w;
   if (pos2d.w <= 0.0 || pos2d.z < -pos2d.w ||
       pos2d.x < -clip || pos2d.x > clip ||
       pos2d.y < -clip || pos2d.y > clip) {
-    var culled: VSOut;
-    culled.position = vec4<f32>(0.0, 0.0, 2.0, 1.0);
-    culled.v_color = vec4<f32>(0.0);
-    culled.v_position = vec2<f32>(0.0);
-    culled.v_mode = uniforms.render_params.x;
-    return culled;
+    return empty_vertex(point_mode);
   }
 
-  let packed_color = splats[base + 6u];
-  var color = vec4<f32>(
-    f32(packed_color & 0xffu),
-    f32((packed_color >> 8u) & 0xffu),
-    f32((packed_color >> 16u) & 0xffu),
-    f32((packed_color >> 24u) & 0xffu)
-  ) / 255.0;
-
-  if (uniforms.camera_pos.w > 0.5) {
-    let sh_base = index * 9u;
-    let dir = normalize(center - uniforms.camera_pos.xyz);
-    let sh1 = vec3<f32>(sh_rest[sh_base + 0u], sh_rest[sh_base + 1u], sh_rest[sh_base + 2u]);
-    let sh2 = vec3<f32>(sh_rest[sh_base + 3u], sh_rest[sh_base + 4u], sh_rest[sh_base + 5u]);
-    let sh3 = vec3<f32>(sh_rest[sh_base + 6u], sh_rest[sh_base + 7u], sh_rest[sh_base + 8u]);
-    let shc1 = 0.4886025119029199;
-    color = vec4<f32>(
-      clamp(color.rgb + shc1 * (-sh1 * dir.y + sh2 * dir.z - sh3 * dir.x), vec3<f32>(0.0), vec3<f32>(1.0)),
-      color.a
-    );
-  }
+  let degree = i32(uniforms.camera_pos.w);
+  let dir = normalize(center - uniforms.camera_pos.xyz);
+  var rgb = eval_sh(index, dir, degree);
 
   let color_mode = uniforms.color_mix.x;
-  let luma = dot(color.rgb, vec3<f32>(0.2989, 0.5870, 0.1140));
+  let luma = dot(rgb, vec3<f32>(0.2989, 0.5870, 0.1140));
   if (color_mode > 2.5) {
-    color = vec4<f32>(0.0, luma, 0.0, color.a);
+    rgb = vec3<f32>(0.0, luma, 0.0);
   } else if (color_mode > 1.5) {
     let bw = select(0.1, 1.0, luma >= 0.5);
-    color = vec4<f32>(vec3<f32>(bw), color.a);
+    rgb = vec3<f32>(bw);
   } else if (color_mode > 0.5) {
-    color = vec4<f32>(vec3<f32>(luma), color.a);
+    rgb = vec3<f32>(luma);
   }
 
   let center_ndc = pos2d.xy / pos2d.w;
-  let point_mode = uniforms.render_params.x;
   var major_axis: vec2<f32>;
   var minor_axis: vec2<f32>;
+  var sigma_quad = input.quad_pos * 3.0;
 
   if (point_mode > 0.5) {
     let point_size = max(uniforms.render_params.y, 0.5);
     major_axis = vec2<f32>(point_size, 0.0);
     minor_axis = vec2<f32>(0.0, point_size);
+    sigma_quad = input.quad_pos;
   } else {
-    let packed_rotation = splats[base + 7u];
-    let qw = (f32(packed_rotation & 0xffu) - 128.0) / 128.0;
-    let qx = (f32((packed_rotation >> 8u) & 0xffu) - 128.0) / 128.0;
-    let qy = (f32((packed_rotation >> 16u) & 0xffu) - 128.0) / 128.0;
-    let qz = (f32((packed_rotation >> 24u) & 0xffu) - 128.0) / 128.0;
-
-    let qxqx = qx * qx;
-    let qyqy = qy * qy;
-    let qzqz = qz * qz;
-    let qxqy = qx * qy;
-    let qxqz = qx * qz;
-    let qyqz = qy * qz;
-    let qwqx = qw * qx;
-    let qwqy = qw * qy;
-    let qwqz = qw * qz;
-
-    let m0 = (1.0 - 2.0 * (qyqy + qzqz)) * scale.x;
-    let m1 = (2.0 * (qxqy + qwqz)) * scale.x;
-    let m2 = (2.0 * (qxqz - qwqy)) * scale.x;
-    let m3 = (2.0 * (qxqy - qwqz)) * scale.y;
-    let m4 = (1.0 - 2.0 * (qxqx + qzqz)) * scale.y;
-    let m5 = (2.0 * (qyqz + qwqx)) * scale.y;
-    let m6 = (2.0 * (qxqz + qwqy)) * scale.z;
-    let m7 = (2.0 * (qyqz - qwqx)) * scale.z;
-    let m8 = (1.0 - 2.0 * (qxqx + qyqy)) * scale.z;
-
-    let vrk = mat3x3<f32>(
-      vec3<f32>(m0 * m0 + m3 * m3 + m6 * m6, m0 * m1 + m3 * m4 + m6 * m7, m0 * m2 + m3 * m5 + m6 * m8),
-      vec3<f32>(m0 * m1 + m3 * m4 + m6 * m7, m1 * m1 + m4 * m4 + m7 * m7, m1 * m2 + m4 * m5 + m7 * m8),
-      vec3<f32>(m0 * m2 + m3 * m5 + m6 * m8, m1 * m2 + m4 * m5 + m7 * m8, m2 * m2 + m5 * m5 + m8 * m8)
-    );
-
     let z = cam.z;
     if (abs(z) < 0.0001) {
-      var rejected: VSOut;
-      rejected.position = vec4<f32>(0.0, 0.0, 2.0, 1.0);
-      rejected.v_color = vec4<f32>(0.0);
-      rejected.v_position = vec2<f32>(0.0);
-      rejected.v_mode = point_mode;
-      return rejected;
+      return empty_vertex(point_mode);
     }
-    let j = mat3x3<f32>(
-      vec3<f32>(uniforms.focal.x / z, 0.0, -(uniforms.focal.x * cam.x) / (z * z)),
-      vec3<f32>(0.0, -uniforms.focal.y / z, (uniforms.focal.y * cam.y) / (z * z)),
-      vec3<f32>(0.0, 0.0, 0.0)
-    );
-
-    let view3 = mat3x3<f32>(
+    let vrk = cov3d_from_quat(quat, scale);
+    let R = mat3x3<f32>(
       uniforms.view[0].xyz,
       uniforms.view[1].xyz,
       uniforms.view[2].xyz
     );
-    let t = transpose(view3) * j;
-    var cov2d = transpose(t) * vrk * t;
+    let J = mat3x3<f32>(
+      vec3<f32>(uniforms.focal.x / z, 0.0, 0.0),
+      vec3<f32>(0.0, uniforms.focal.y / z, 0.0),
+      vec3<f32>(
+        -(uniforms.focal.x * cam.x) / (z * z),
+        -(uniforms.focal.y * cam.y) / (z * z),
+        0.0
+      )
+    );
+    let view_cov = R * vrk * transpose(R);
+    var cov = J * view_cov * transpose(J);
     let antialias = max(uniforms.color_mix.w, 0.0);
-    cov2d[0][0] += antialias;
-    cov2d[1][1] += antialias;
+    cov[0][0] += antialias;
+    cov[1][1] += antialias;
 
-    let mid = (cov2d[0][0] + cov2d[1][1]) * 0.5;
-    let radius = length(vec2<f32>((cov2d[0][0] - cov2d[1][1]) * 0.5, cov2d[0][1]));
+    let a = cov[0][0];
+    let b = cov[0][1];
+    let c = cov[1][1];
+    let mid = 0.5 * (a + c);
+    let det = max(a * c - b * b, 0.0);
+    let radius = sqrt(max(0.1, mid * mid - det));
     let lambda1 = mid + radius;
     let lambda2 = max(mid - radius, 0.1);
-    let axis_vec = vec2<f32>(cov2d[0][1], lambda1 - cov2d[0][0]);
+    let axis_vec = vec2<f32>(b, lambda1 - a);
     let axis_len = length(axis_vec);
     let diag = select(vec2<f32>(1.0, 0.0), axis_vec / max(axis_len, 1e-8), axis_len >= 1e-6);
-    let splat_scale = uniforms.render_params.w;
-    major_axis = min(sqrt(2.0 * lambda1), 1024.0) * diag * splat_scale;
-    minor_axis = min(sqrt(2.0 * lambda2), 1024.0) * vec2<f32>(diag.y, -diag.x) * splat_scale;
+    // Paper 3-sigma extent in pixels; quad is [-1, 1].
+    major_axis = min(3.0 * sqrt(lambda1), 1024.0) * diag;
+    minor_axis = min(3.0 * sqrt(lambda2), 1024.0) * vec2<f32>(diag.y, -diag.x);
   }
 
   var out: VSOut;
-  out.v_color = color;
-  out.v_position = input.quad_pos;
+  out.v_color = vec4<f32>(rgb, opacity);
+  out.v_position = sigma_quad;
   out.v_mode = point_mode;
   out.position = vec4<f32>(
     center_ndc
-      + input.quad_pos.x * major_axis / uniforms.viewport
-      + input.quad_pos.y * minor_axis / uniforms.viewport,
+      + 2.0 * input.quad_pos.x * major_axis / uniforms.viewport
+      + 2.0 * input.quad_pos.y * minor_axis / uniforms.viewport,
     0.0,
     1.0
   );
@@ -365,16 +409,20 @@ fn fs_main(input: VSOut) -> @location(0) vec4<f32> {
   let rgb = grade(input.v_color.rgb);
   let alpha_mul = clamp(uniforms.color_basic.w, 0.0, 4.0);
   let discard_r2 = uniforms.color_levels.x;
-  let a = -dot(input.v_position, input.v_position);
-  if (a < -discard_r2) {
+  let r2 = dot(input.v_position, input.v_position);
+  if (r2 > discard_r2) {
     discard;
   }
   if (input.v_mode > 0.5) {
-    let alpha = input.v_color.a * alpha_mul;
+    let alpha = min(0.99, input.v_color.a * alpha_mul);
     return vec4<f32>(rgb * alpha, alpha);
   }
-  let b = exp(a) * input.v_color.a * alpha_mul;
-  return vec4<f32>(b * rgb, b);
+  // Eq. (2): α = o · exp(-½ mahalanobis²), clamped like the CUDA rasterizer.
+  let alpha = min(0.99, input.v_color.a * exp(-0.5 * r2) * alpha_mul);
+  if (alpha < 1.0 / 255.0) {
+    discard;
+  }
+  return vec4<f32>(rgb * alpha, alpha);
 }
 `;
 
@@ -407,7 +455,7 @@ export class WebGPUSplatRenderer {
       contrast: 1,
       gamma: 1,
       alpha: 1,
-      pixelDiscard: 4,
+      pixelDiscard: 9,
       intensity: 1,
       saturation: 1,
       colorMode: 0,
@@ -429,13 +477,21 @@ export class WebGPUSplatRenderer {
     }
     const adapter = await navigator.gpu.requestAdapter();
     if (!adapter) throw new Error("No WebGPU adapter found.");
-    this.device = await adapter.requestDevice();
+    const requiredLimits = {};
+    if (adapter.limits.maxStorageBufferBindingSize) {
+      requiredLimits.maxStorageBufferBindingSize = adapter.limits.maxStorageBufferBindingSize;
+    }
+    if (adapter.limits.maxBufferSize) {
+      requiredLimits.maxBufferSize = adapter.limits.maxBufferSize;
+    }
+    this.device = await adapter.requestDevice({ requiredLimits });
     this.context = this.canvas.getContext("webgpu");
     this.format = navigator.gpu.getPreferredCanvasFormat();
     this.context.configure({
       device: this.device,
       format: this.format,
       alphaMode: "premultiplied",
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
     });
 
     this.uniformBuffer = createBuffer(
@@ -466,7 +522,7 @@ export class WebGPUSplatRenderer {
     this.zeroHist = new Uint8Array(HIST_BINS * 4);
     this.minmaxInit = new Uint32Array([0xffffffff, 0]);
 
-    const quad = new Float32Array([-2, -2, 2, -2, -2, 2, 2, 2]);
+    const quad = new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]);
     this.quadBuffer = createBuffer(
       this.device,
       quad.byteLength,
@@ -561,18 +617,24 @@ export class WebGPUSplatRenderer {
     });
   }
 
-  setSplats(packedUint8, extra = {}) {
-    const count = packedUint8.byteLength / 32;
+  setCloud(gaussians, sh, shDegree = 0) {
+    const count = gaussians.length / GAUSSIAN_FLOATS;
     this.count = count;
-    this.shDegree = extra.shDegree || 0;
+    this.shDegree = shDegree || 0;
     if (count === 0) return;
     if (count > this.capacity) {
       this.capacity = Math.max(count, Math.ceil(this.capacity * 1.5) || count);
-      const splatSize = this.capacity * 32;
+      const gaussSize = this.capacity * GAUSSIAN_FLOATS * 4;
+      const shSize = this.capacity * SH_FLOATS * 4;
       const indexSize = this.capacity * 4;
       this.splatBuffer = createBuffer(
         this.device,
-        splatSize,
+        gaussSize,
+        GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+      );
+      this.shBuffer = createBuffer(
+        this.device,
+        Math.max(shSize, 16),
         GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
       );
       this.depthBuffer = createBuffer(
@@ -591,28 +653,12 @@ export class WebGPUSplatRenderer {
         GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
       );
     }
-    this.device.queue.writeBuffer(
-      this.splatBuffer,
-      0,
-      packedUint8.buffer,
-      packedUint8.byteOffset,
-      packedUint8.byteLength
-    );
+    this.device.queue.writeBuffer(this.splatBuffer, 0, gaussians);
+    const shData = sh && sh.length ? sh : new Float32Array(count * SH_FLOATS);
+    this.device.queue.writeBuffer(this.shBuffer, 0, shData);
     const identity = new Uint32Array(count);
     for (let i = 0; i < count; i++) identity[i] = i;
     this.device.queue.writeBuffer(this.sortedBuffer, 0, identity);
-    const sh1 = extra.sh1;
-    if (this.shDegree >= 1 && sh1 && sh1.length >= count * 9) {
-      const shBytes = Math.max(count * 9 * 4, 16);
-      if (!this.shBuffer || this.shBuffer.size < shBytes) {
-        this.shBuffer = createBuffer(
-          this.device,
-          shBytes,
-          GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
-        );
-      }
-      this.device.queue.writeBuffer(this.shBuffer, 0, sh1);
-    }
     this._rebuildBindGroups();
   }
 
@@ -681,7 +727,7 @@ export class WebGPUSplatRenderer {
     u[52] = this.camera.eye[0];
     u[53] = this.camera.eye[1];
     u[54] = this.camera.eye[2];
-    u[55] = this.shDegree >= 1 ? 1 : 0;
+    u[55] = this.shDegree;
     this.device.queue.writeBuffer(this.uniformBuffer, 0, u);
 
     const su = new ArrayBuffer(80);
@@ -737,5 +783,78 @@ export class WebGPUSplatRenderer {
     renderPass.draw(4, this.count);
     renderPass.end();
     this.device.queue.submit([encoder.finish()]);
+  }
+
+  async snapshotPng(maxEdge = 1024) {
+    if (!this.device || !this.context) {
+      throw new Error("WebGPU is not initialized");
+    }
+    await this.device.queue.onSubmittedWorkDone();
+    const canvas = this.canvas;
+    if (typeof canvas.toBlob === "function") {
+      const blob = await new Promise((resolve, reject) => {
+        canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("canvas.toBlob failed"))), "image/png");
+      });
+      if (blob && blob.size > 32) return blob;
+    }
+    const tex = this.context.getCurrentTexture();
+    const w = tex.width;
+    const h = tex.height;
+    const bytesPerRow = Math.ceil((w * 4) / 256) * 256;
+    const buf = this.device.createBuffer({
+      size: bytesPerRow * h,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const encoder = this.device.createCommandEncoder();
+    encoder.copyTextureToBuffer({ texture: tex }, { buffer: buf, bytesPerRow }, { width: w, height: h });
+    this.device.queue.submit([encoder.finish()]);
+    await buf.mapAsync(GPUMapMode.READ);
+    const src = new Uint8Array(buf.getMappedRange());
+    const rgba = new Uint8ClampedArray(w * h * 4);
+    const bgra = this.format.startsWith("bgra");
+    for (let y = 0; y < h; y++) {
+      const row = y * bytesPerRow;
+      for (let x = 0; x < w; x++) {
+        const s = row + x * 4;
+        const d = (y * w + x) * 4;
+        if (bgra) {
+          rgba[d] = src[s + 2];
+          rgba[d + 1] = src[s + 1];
+          rgba[d + 2] = src[s];
+          rgba[d + 3] = src[s + 3];
+        } else {
+          rgba[d] = src[s];
+          rgba[d + 1] = src[s + 1];
+          rgba[d + 2] = src[s + 2];
+          rgba[d + 3] = src[s + 3];
+        }
+      }
+    }
+    buf.unmap();
+    buf.destroy();
+    const off = document.createElement("canvas");
+    let dw = w;
+    let dh = h;
+    if (Math.max(w, h) > maxEdge) {
+      const s = maxEdge / Math.max(w, h);
+      dw = Math.max(1, Math.round(w * s));
+      dh = Math.max(1, Math.round(h * s));
+    }
+    off.width = dw;
+    off.height = dh;
+    const ctx = off.getContext("2d");
+    const img = new ImageData(rgba, w, h);
+    if (dw === w && dh === h) {
+      ctx.putImageData(img, 0, 0);
+    } else {
+      const full = document.createElement("canvas");
+      full.width = w;
+      full.height = h;
+      full.getContext("2d").putImageData(img, 0, 0);
+      ctx.drawImage(full, 0, 0, dw, dh);
+    }
+    return new Promise((resolve, reject) => {
+      off.toBlob((b) => (b ? resolve(b) : reject(new Error("snapshot encode failed"))), "image/png");
+    });
   }
 }

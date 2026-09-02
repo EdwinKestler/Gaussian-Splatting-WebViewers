@@ -1,6 +1,8 @@
 import { WebGPUSplatRenderer } from "./gpu-renderer.js";
 
-const DEFAULT_PLY = "./demo.ply";
+const DEMO_PLY = "./demo.ply";
+const DEFAULT_SCENE = "../splats/model.splat";
+const SIDECAR_URL = "http://127.0.0.1:8766";
 const SAMPLE_SPLAT =
   "https://huggingface.co/cakewalk/splat-data/resolve/main/train.splat";
 const LOCAL_SPLAT = "../splat_converter/test.splat";
@@ -70,7 +72,7 @@ class OrbitCamera {
     this.upSign = 1;
     this.fov = (50 * Math.PI) / 180;
     this.near = 0.05;
-    this.far = 200;
+    this.far = 500;
     this.dampYaw = 0;
     this.dampPitch = 0;
     this.dampPanX = 0;
@@ -93,9 +95,11 @@ class OrbitCamera {
 
   fit(bounds) {
     this.target = bounds.center.slice();
-    this.radius = Math.max(bounds.radius * 2.4, 0.8);
+    this.radius = Math.max(bounds.radius * 3.2, 0.8);
     this.yaw = 0.55;
     this.pitch = 0.28;
+    this.far = Math.max(200, bounds.radius * 20);
+    this.near = Math.max(0.02, bounds.radius * 0.0004);
   }
 
   step() {
@@ -196,6 +200,13 @@ const ui = {
   setMeta(text) {
     $("meta").textContent = text;
   },
+  setNote(text, kind = "") {
+    const el = $("format-note");
+    if (!el) return;
+    el.textContent = text || "";
+    el.hidden = !text;
+    el.dataset.kind = kind;
+  },
   setFps(fps) {
     $("fps").textContent = `${fps.toFixed(0)} fps`;
   },
@@ -227,6 +238,8 @@ async function main() {
   let convertPending = null;
   let last = performance.now();
   let fps = 0;
+  let freezeFrame = false;
+  let lastSemantic = null;
 
   const paramsFromUi = () => ({
     pointMode: $("point-mode").checked ? 1 : 0,
@@ -253,6 +266,7 @@ async function main() {
         device: renderer.device,
         format: renderer.format,
         alphaMode: "premultiplied",
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
       });
     }
   }
@@ -260,6 +274,7 @@ async function main() {
   function parseBuffer(buffer, name, compression) {
     const id = ++jobId;
     ui.setStatus(`Parsing ${name}…`);
+    ui.setNote("");
     ui.showOverlay(true);
     return new Promise((resolve, reject) => {
       pending = { id, resolve, reject };
@@ -290,20 +305,46 @@ async function main() {
   async function loadFromBuffer(buffer, name) {
     const compression = Number($("compression").value);
     const result = await parseBuffer(buffer, name, compression);
-    renderer.setSplats(result.packed, {
-      shDegree: result.shDegree || 0,
-      sh1: result.sh1,
-    });
+    renderer.setCloud(result.gaussians, result.sh, result.shDegree || 0);
     camera.fit(result.bounds);
     const decoder = result.decoder === "gaussforge" ? "GaussForge" : "built-in";
-    const sh = result.shDegree ? ` · SH${result.shDegree}` : "";
+    const degree = result.shDegree || 0;
+    const sh = ` · SH${degree}`;
     ui.setMeta(
       `${name} · ${result.format} · ${decoder}${sh} · ${result.count.toLocaleString()} gaussians`
     );
+    const compact =
+      result.format === "splat" ||
+      result.format === "splat32" ||
+      result.format === "splat44";
+    if (compact) {
+      ui.setNote(
+        "Compact .splat is SH0 with 8-bit rotations — a preview, not the trained radiance field. Drop an INRIA point_cloud/iteration_*/point_cloud.ply (with f_rest_* / SH1–3) for full 3DGS.",
+        "warn"
+      );
+    } else if (degree < 3) {
+      ui.setNote(
+        `This file is spherical-harmonics degree ${degree} (view-independent DC). A trained graphdeco-inria PLY includes f_rest_0…f_rest_44 (SH3) for view-dependent color.`,
+        "warn"
+      );
+    } else {
+      ui.setNote(
+        "Full 3DGS radiance field: float covariance + SH degree 3 (Kerbl et al.). Leave Point cloud debug unchecked.",
+        "ok"
+      );
+    }
     const note = result.warning ? `Ready (${result.warning})` : "Ready";
     ui.setStatus(note, "ok");
     ui.setProgress(1);
     ui.showOverlay(false);
+    window.__gsViewer = {
+      name,
+      format: result.format,
+      decoder: result.decoder,
+      shDegree: degree,
+      count: result.count,
+      compact,
+    };
   }
 
   async function exportFormat(outFormat) {
@@ -363,7 +404,10 @@ async function main() {
     }
   });
 
-  $("load-demo").addEventListener("click", () => loadUrl(DEFAULT_PLY, "demo.ply"));
+  $("load-demo").addEventListener("click", () => loadUrl(DEMO_PLY, "demo.ply"));
+  $("load-model").addEventListener("click", () =>
+    loadUrl(DEFAULT_SCENE, "model.splat")
+  );
   $("load-train").addEventListener("click", () =>
     loadUrl(SAMPLE_SPLAT, "train.splat")
   );
@@ -379,6 +423,157 @@ async function main() {
     e.target.value = "";
     if (fmt) exportFormat(fmt);
   });
+
+  async function blobToB64(blob) {
+    const buf = await blob.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    let bin = "";
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      bin += String.fromCharCode(...bytes.subarray(i, i + chunk));
+    }
+    return btoa(bin);
+  }
+
+  function drawBoxes(objects) {
+    const overlay = $("sem-overlay");
+    if (!overlay) return;
+    overlay.innerHTML = "";
+    if (!objects || !objects.length) return;
+    for (const obj of objects) {
+      const box = obj.best_box || (obj.views && obj.views[0] && obj.views[0].box);
+      if (!box) continue;
+      const el = document.createElement("div");
+      el.className = "sem-box";
+      el.style.left = `${box[0] * 100}%`;
+      el.style.top = `${box[1] * 100}%`;
+      el.style.width = `${box[2] * 100}%`;
+      el.style.height = `${box[3] * 100}%`;
+      el.innerHTML = `<span>${obj.name}</span>`;
+      overlay.appendChild(el);
+    }
+  }
+
+  function renderSemanticPanel(result) {
+    const list = $("sem-list");
+    const cards = $("sem-cards");
+    if (!list) return;
+    lastSemantic = result;
+    list.innerHTML = "";
+    cards.innerHTML = "";
+    const objects = result.objects || [];
+    $("sem-meta").textContent = `${objects.length} objects · ${result.view_count} views · ${result.vision_model}${
+      result.imagine_model ? " · " + result.imagine_model : ""
+    }`;
+    for (const obj of objects) {
+      const li = document.createElement("li");
+      li.textContent = `${obj.name} (${(obj.confidence * 100).toFixed(0)}%)`;
+      list.appendChild(li);
+    }
+    for (const card of result.cards || []) {
+      const fig = document.createElement("figure");
+      if (card.error) {
+        fig.innerHTML = `<figcaption>${card.name}: ${card.error}</figcaption>`;
+      } else {
+        const src = card.b64
+          ? `data:${card.mime || "image/jpeg"};base64,${card.b64}`
+          : card.url;
+        const saved = card.path ? `<br><code>${card.path}</code>` : "";
+        fig.innerHTML = `<img alt="${card.name}" src="${src}" /><figcaption>${card.name}${saved}</figcaption>`;
+      }
+      cards.appendChild(fig);
+    }
+    drawBoxes(objects);
+    window.__gsSemantic = result;
+  }
+
+  async function captureViews(n) {
+    freezeFrame = true;
+    const saved = { yaw: camera.yaw, pitch: camera.pitch, radius: camera.radius };
+    const views = [];
+    const count = Math.max(1, Math.min(8, n | 0));
+    try {
+      for (let i = 0; i < count; i++) {
+        if (count > 1) camera.yaw = saved.yaw + (i * 2 * Math.PI) / count;
+        camera.dampYaw = 0;
+        camera.dampPitch = 0;
+        camera.dampPanX = 0;
+        camera.dampPanY = 0;
+        camera.dampZoom = 0;
+        resize();
+        const aspect = canvas.width / canvas.height;
+        const proj = perspective(camera.fov, aspect, camera.near, camera.far);
+        const viewM = lookAt(camera.eye(), camera.target, camera.up());
+        const fy = canvas.height / (2 * Math.tan(camera.fov / 2));
+        renderer.setCamera(proj, viewM, [fy, fy], [canvas.width, canvas.height], camera.eye());
+        renderer.setParams(paramsFromUi());
+        renderer.render();
+        const blob = await renderer.snapshotPng(1024);
+        views.push({
+          png_b64: await blobToB64(blob),
+          yaw: camera.yaw,
+          pitch: camera.pitch,
+          eye: camera.eye(),
+        });
+        ui.setStatus(`Captured view ${i + 1}/${count}`);
+      }
+    } finally {
+      camera.yaw = saved.yaw;
+      camera.pitch = saved.pitch;
+      camera.radius = saved.radius;
+      freezeFrame = false;
+    }
+    return views;
+  }
+
+  async function analyzeScene() {
+    if (!renderer.count) {
+      ui.setStatus("Load a scene first", "err");
+      return;
+    }
+    const n = Number($("sem-views").value) || 1;
+    const makeCards = $("sem-cards-toggle").checked;
+    ui.setStatus("Capturing 3DGS views…");
+    ui.showOverlay(true);
+    try {
+      const health = await fetch(`${SIDECAR_URL}/health`);
+      if (!health.ok) throw new Error("sidecar HTTP " + health.status);
+      const h = await health.json();
+      if (!h.xai) throw new Error("sidecar has no XAI_API_KEY");
+      const views = await captureViews(n);
+      ui.setStatus(`Tagging ${views.length} view(s) with Grok…`);
+      const res = await fetch(`${SIDECAR_URL}/analyze`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          views,
+          make_cards: makeCards,
+          max_cards: Number($("sem-max-cards").value) || 3,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || `analyze ${res.status}`);
+      renderSemanticPanel(data);
+      ui.setStatus(
+        `Tagged ${data.objects.length} object(s)` +
+          (makeCards ? ` · ${data.cards.length} Imagine card(s)` : ""),
+        "ok"
+      );
+    } catch (err) {
+      const msg = String(err && err.message ? err.message : err);
+      const hint = /fetch|Failed|ECONNREFUSED|NetworkError/i.test(msg)
+        ? " — start ./semantic_sidecar/launch.sh (port 8766)"
+        : "";
+      ui.setStatus(msg + hint, "err");
+    } finally {
+      ui.showOverlay(false);
+    }
+  }
+
+  $("sem-analyze").addEventListener("click", () => analyzeScene());
+  window.__gsAnalyze = analyzeScene;
+  window.__gsCamera = camera;
+  window.__gsRenderer = renderer;
 
   const drop = document.body;
   drop.addEventListener("dragover", (e) => {
@@ -402,15 +597,17 @@ async function main() {
   });
 
   function frame(now) {
-    resize();
-    camera.step();
-    const aspect = canvas.width / canvas.height;
-    const proj = perspective(camera.fov, aspect, camera.near, camera.far);
-    const view = lookAt(camera.eye(), camera.target, camera.up());
-    const fy = canvas.height / (2 * Math.tan(camera.fov / 2));
-    renderer.setCamera(proj, view, [fy, fy], [canvas.width, canvas.height], camera.eye());
-    renderer.setParams(paramsFromUi());
-    renderer.render();
+    if (!freezeFrame) {
+      resize();
+      camera.step();
+      const aspect = canvas.width / canvas.height;
+      const proj = perspective(camera.fov, aspect, camera.near, camera.far);
+      const view = lookAt(camera.eye(), camera.target, camera.up());
+      const fy = canvas.height / (2 * Math.tan(camera.fov / 2));
+      renderer.setCamera(proj, view, [fy, fy], [canvas.width, canvas.height], camera.eye());
+      renderer.setParams(paramsFromUi());
+      renderer.render();
+    }
     const dt = now - last;
     last = now;
     fps = fps * 0.9 + (1000 / Math.max(dt, 0.1)) * 0.1;
@@ -423,7 +620,7 @@ async function main() {
   const start =
     params.get("url") ||
     params.get("file") ||
-    DEFAULT_PLY;
+    DEFAULT_SCENE;
   const startName = start.split("/").pop() || "scene";
   try {
     await loadUrl(start, startName);

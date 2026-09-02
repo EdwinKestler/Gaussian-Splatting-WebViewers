@@ -35,8 +35,10 @@
       position: absolute;
       inset: 16px auto auto 16px;
       min-width: 280px;
-      max-width: 340px;
+      max-width: 360px;
       padding: 14px 16px 16px;
+      max-height: calc(100% - 32px);
+      overflow: auto;
       background: var(--panel);
       border: 1px solid var(--line);
       border-radius: 14px;
@@ -91,6 +93,14 @@
     #status { min-height: 1.4em; }
     #status[data-kind="ok"] { color: var(--accent); }
     #status[data-kind="err"] { color: var(--err); }
+    #format-note {
+      margin: 8px 0 0;
+      font-size: 11px;
+      line-height: 1.4;
+      color: var(--warn);
+    }
+    #format-note[data-kind="ok"] { color: var(--accent); }
+    #format-note[hidden] { display: none; }
     #progress {
       height: 3px;
       background: var(--line);
@@ -127,17 +137,56 @@
     }
     a { color: var(--accent); }
     .check { display: flex; align-items: center; gap: 8px; color: var(--muted); margin: 8px 0; }
+    #sem-overlay {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+    }
+    .sem-box {
+      position: absolute;
+      border: 1px solid var(--accent);
+      box-shadow: 0 0 0 1px rgba(0,0,0,0.4);
+    }
+    .sem-box span {
+      display: inline-block;
+      margin: 2px 4px;
+      padding: 1px 5px;
+      background: rgba(7, 9, 13, 0.82);
+      color: var(--accent);
+      font-size: 11px;
+    }
+    #sem-panel {
+      position: absolute;
+      top: 16px;
+      right: 16px;
+      width: 280px;
+      max-height: calc(100% - 32px);
+      overflow: auto;
+      padding: 12px 14px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      backdrop-filter: blur(16px);
+    }
+    #sem-panel h2 { margin: 0 0 6px; font-size: 13px; }
+    #sem-list { margin: 6px 0; padding-left: 18px; color: var(--muted); }
+    #sem-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    #sem-cards figure { margin: 0; }
+    #sem-cards img { width: 100%; border-radius: 8px; display: block; background: #111; }
+    #sem-cards figcaption { font-size: 11px; color: var(--muted); margin-top: 4px; }
   </style>
 </head>
 <body>
   <canvas id="gpu-canvas"></canvas>
+  <div id="sem-overlay"></div>
   <aside id="hud">
     <h1>WebGPU 3DGS Viewer</h1>
     <div class="row">
       <span id="fps">0 fps</span>
-      <span>GaussForge + GPU sort</span>
+      <span>INRIA SH0–3 · GPU sort</span>
     </div>
     <div id="meta">No scene loaded</div>
+    <div id="format-note" hidden></div>
     <div id="progress"><div id="progress-bar"></div></div>
     <div id="status">Starting…</div>
     <input id="url-input" type="text" placeholder="https://…/scene.ply .splat .spz .ksplat .sog" />
@@ -146,6 +195,7 @@
       <label class="file-btn">Open file
         <input id="file-input" type="file" accept=".ply,.splat,.spz,.ksplat,.sog,.compressed.ply" hidden />
       </label>
+      <button id="load-model" type="button">model.splat</button>
       <button id="load-demo" type="button">Demo PLY</button>
       <button id="load-train" type="button">Train .splat</button>
       <button id="load-local" type="button">Local test.splat</button>
@@ -160,7 +210,7 @@
         <option value="compressed.ply">Export compressed PLY</option>
       </select>
     </div>
-    <div class="check"><input id="point-mode" type="checkbox" /> Point cloud debug</div>
+    <div class="check"><input id="point-mode" type="checkbox" /> Point cloud debug (off = full 3DGS)</div>
     <label>Scale <input id="splat-scale" type="range" min="0.2" max="3" step="0.05" value="1" /><span class="val"></span></label>
     <label>Opacity <input id="opacity" type="range" min="0.1" max="2" step="0.05" value="1" /><span class="val"></span></label>
     <label>Keep 1/N <input id="compression" type="range" min="1" max="10" step="1" value="1" /><span class="val"></span></label>
@@ -169,7 +219,7 @@
     <label>Gamma <input id="gamma" type="range" min="0.4" max="2.2" step="0.01" value="1" /><span class="val"></span></label>
     <label>Exposure <input id="intensity" type="range" min="0.2" max="2.5" step="0.01" value="1" /><span class="val"></span></label>
     <label>Saturation <input id="saturation" type="range" min="0" max="2" step="0.01" value="1" /><span class="val"></span></label>
-    <label>Discard <input id="pixel-discard" type="range" min="1" max="8" step="0.1" value="4" /><span class="val"></span></label>
+    <label>Discard <input id="pixel-discard" type="range" min="1" max="16" step="0.1" value="9" /><span class="val"></span></label>
     <label>AA <input id="antialias" type="range" min="0" max="1.5" step="0.05" value="0.3" /><span class="val"></span></label>
     <label>Color
       <select id="color-mode">
@@ -180,9 +230,21 @@
       </select>
       <span></span>
     </label>
-    <p style="margin:10px 0 0;color:var(--muted);font-size:11px;">Decode: <a href="https://github.com/3dgscloud/GaussForge" target="_blank" rel="noopener">GaussForge</a></p>
+    <div class="btns">
+      <button id="sem-analyze" type="button">Tag scene (Grok)</button>
+    </div>
+    <div class="check"><input id="sem-cards-toggle" type="checkbox" checked /> Imagine 2.0 object cards</div>
+    <label>Views <input id="sem-views" type="range" min="1" max="6" step="1" value="1" /><span class="val"></span></label>
+    <label>Cards <input id="sem-max-cards" type="range" min="1" max="4" step="1" value="2" /><span class="val"></span></label>
+    <p style="margin:10px 0 0;color:var(--muted);font-size:11px;">Rasterizer follows <a href="https://github.com/graphdeco-inria/gaussian-splatting" target="_blank" rel="noopener">graphdeco-inria/gaussian-splatting</a>. Decode: <a href="https://github.com/3dgscloud/GaussForge" target="_blank" rel="noopener">GaussForge</a>. Tags/cards via local sidecar + Grok Imagine 2.0.</p>
   </aside>
-  <div id="hint">Drag PLY / SPLAT / SPZ / KSPLAT / SOG · orbit LMB · pan RMB · scroll zoom</div>
+  <aside id="sem-panel">
+    <h2>Open-vocab tags</h2>
+    <div id="sem-meta" style="color:var(--muted);font-size:11px;">Sidecar http://127.0.0.1:8766 · start ./semantic_sidecar/launch.sh</div>
+    <ul id="sem-list"></ul>
+    <div id="sem-cards"></div>
+  </aside>
+  <div id="hint">Default scene: <code>splats/model.splat</code> · drop a trained <code>point_cloud.ply</code> for SH3 · orbit LMB · pan RMB · scroll zoom</div>
   <div id="overlay" class="hidden"></div>
   <div id="unsupported" class="hidden">
     <div class="card">

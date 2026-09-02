@@ -3,9 +3,17 @@
 *.swp
 .DS_Store
 node_modules/
+.env
+__pycache__/
+*.pyc
+semantic_sidecar/captures/
+semantic_sidecar/cache/
+img_output/**
+!img_output/README.md
 
 # Local captures / symlinks (keep demo.ply)
 gaussian_splatting_webgpu/model.splat
+gaussian_splatting_webgpu/trained.ply
 splats/
 
 # Chrome scratch profiles
