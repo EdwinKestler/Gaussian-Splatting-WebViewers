@@ -84,6 +84,8 @@ Shared parser: `shared/splat-io.js`. WebGL viewers still pack to 32-byte rows. T
 - Reads 2D Gaussian Splatting PLYs (two log-scales) and plain point-cloud PLYs (`variant` reported by `describePly`)
 - **Identity layer (plan F1):** a `u32` label per Gaussian plus an instance table (rigid transform, tint, visible/selected) in the shader; output modes colour / depth / normal / ID with `renderOffscreen()` readback and `pick(x, y)`; HUD panel **Instancias** (click selects, *Aislar* / *Ocultar* / *Teñir*, `Escena sintética (2 esferas)`)
 - `?offscreen=1` skips the canvas context (headless SwiftShader tests); `selftest.html` renders offscreen and reports `SELFTEST_OK`
+- `?scene=synthetic` loads the deterministic two-sphere scene from `shared/synthetic.js` (labels 1 = esfera A, 2 = esfera B) used by the F1 acceptance tests
+- Depth mode returns the alpha-weighted *mean* view distance for now; the 2DGS median depth arrives with the K-buffer resolve (plan F3)
 
 **Point cloud debug** is a diagnostic overlay. Leave it unchecked for the radiance-field rendering.
 
@@ -95,8 +97,8 @@ Optional **open-vocab tags** and **Imagine 2.0 object cards**: start `./semantic
 
 ```bash
 npm install          # @playwright/test 1.56.1 (browsers are not downloaded)
-npm test             # Node unit tests for shared/splat-io.js
-npm run test:e2e     # Playwright + Chromium WebGPU (SwiftShader when no GPU), offscreen rendering only
+npm test             # 46 Node unit tests for shared/splat-io.js
+npm run test:e2e     # 10 Playwright tests on Chromium WebGPU (SwiftShader when no GPU), offscreen rendering only
 ```
 
 Details, GPU flags (`WEBGPU_ARGS`) and the SwiftShader canvas caveat: [docs/testing.md](docs/testing.md). Generated outputs go under `artifacts/` (gitignored).

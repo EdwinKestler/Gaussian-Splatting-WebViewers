@@ -253,3 +253,42 @@ test("compute + offscreen render survive under SwiftShader", async ({ page }) =>
   expect(result.pixels.bottomRight).toEqual([0, 255, 0, 255]);
   expect(result.lost, "el dispositivo WebGPU se perdió").toBeNull();
 });
+
+// F0 acceptance "carga sin red": the parse worker must decode through the
+// vendored GaussForge copy even when the CDN is unreachable.
+test("parse-worker decodes with vendored GaussForge while the CDN is blocked", async ({ page }) => {
+  const cdnRequests = [];
+  await page.route("https://cdn.jsdelivr.net/**", (route) => {
+    cdnRequests.push(route.request().url());
+    route.abort("failed");
+  });
+  const result = await page.evaluate(async ({ plyUrl }) => {
+    const buffer = await (await fetch(plyUrl)).arrayBuffer();
+    const worker = new Worker("/gaussian_splatting_webgpu/parse-worker.js", { type: "module" });
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("parse-worker no respondió en 60 s")), 60_000);
+      worker.onmessage = (e) => {
+        clearTimeout(timer);
+        const m = e.data;
+        resolve({
+          ok: m.ok,
+          error: m.error || "",
+          decoder: m.decoder,
+          decoderSource: m.decoderSource,
+          version: m.version,
+          count: m.count,
+          warning: m.warning || "",
+        });
+        worker.terminate();
+      };
+      worker.onerror = (err) => { clearTimeout(timer); reject(new Error(err.message)); };
+      worker.postMessage({ id: 1, buffer, name: "demo.ply", compression: 1 }, [buffer]);
+    });
+  }, { plyUrl: DEMO_PLY_URL });
+  expect(result.ok, result.error).toBe(true);
+  expect(result.decoder, `aviso del worker: ${result.warning}`).toBe("gaussforge");
+  expect(result.decoderSource).toBe("vendor");
+  expect(result.version).toBe("0.6.0");
+  expect(result.count).toBe(DEMO_PLY_COUNT);
+  expect(cdnRequests, "el worker no debe pedir nada al CDN cuando la copia vendorizada carga").toEqual([]);
+});

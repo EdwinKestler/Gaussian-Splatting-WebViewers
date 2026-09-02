@@ -301,7 +301,7 @@ un esquema (`shared/schemas/instancias.schema.json`).
 
 ## 4. Plan por fases
 
-> **Estado (2 sep 2026):** F0 y F1 implementados en la rama `claude/gaussian-splat-plan-f0saqs`: GaussForge vendorizado, PLY 2DGS, `artifacts/`, `npm test` (38 pruebas) y `npm run test:e2e` (8 pruebas, Chromium + SwiftShader, render *offscreen*), búfer de etiquetas + tabla de instancias + modos ID/profundidad/normal + `renderOffscreen()`/`pick()` en `gpu-renderer.js`, panel **Instancias** en el HUD y escena sintética de dos esferas con profundidad verificada al 0,0 %. Ver `docs/testing.md`.
+> **Estado (2 sep 2026):** F0 y F1 implementados en la rama `claude/gaussian-splat-plan-f0saqs`: GaussForge vendorizado (probado con el CDN bloqueado), PLY 2DGS, `artifacts/`, `npm test` (46 pruebas) y `npm run test:e2e` (10 pruebas, Chromium + SwiftShader, render *offscreen*), búfer de etiquetas + tabla de instancias + modos ID/profundidad/normal + `renderOffscreen()`/`pick()` en `gpu-renderer.js`, panel **Instancias** en el HUD y escena sintética de dos esferas con profundidad verificada al 0,0 %. Desviación documentada: el modo profundidad devuelve la media ponderada por alfa, no la mediana 2DGS de §3.2.A; la mediana se obtendrá del K-buffer en F3, antes de que F6 la consuma. Ver `docs/testing.md`.
 
 | Fase | Entregable | Criterio de aceptación | Esfuerzo |
 | --- | --- | --- | --- |

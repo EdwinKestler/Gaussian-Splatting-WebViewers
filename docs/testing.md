@@ -32,10 +32,17 @@ Node 22 no acepta un directorio como argumento de `node --test`, por eso el scri
 patrón *glob*: sólo se ejecutan los ficheros `tests/unit/**/*.test.mjs` (o `.js`/`.cjs`).
 Si el patrón no encuentra ficheros, `node --test` termina con código 0 y cero pruebas.
 
-Cubren `shared/splat-io.js` (PLY 3DGS/2DGS, `.splat` de 32 y 44 bytes, SH0–3) con ficheros
-construidos en memoria; no tocan disco ni red.
+Cubren `shared/splat-io.js` (PLY 3DGS/2DGS/nube de puntos, `.splat` de 32 y 44 bytes, SH0–3,
+filas con escalas no finitas, entrada `SharedArrayBuffer`, submuestreo y `boundsFromGaussians`)
+con ficheros construidos en memoria; no tocan disco ni red.
 
 ## Pruebas e2e con WebGPU
+
+| Fichero | Cubre |
+| --- | --- |
+| `tests/e2e/smoke.spec.mjs` | Adaptador WebGPU, `splat-io` en el navegador, cómputo + render *offscreen* bajo SwiftShader, `parse-worker.js` con GaussForge vendorizado y el CDN bloqueado (criterio F0 «carga sin red») |
+| `tests/e2e/f1-identity.spec.mjs` | Aceptación F1 sobre la escena sintética de dos esferas (`shared/synthetic.js`): `selftest.html`, ID/`pick()`, ocultar/aislar, profundidad < 1 %, normales, transformación por instancia, clic en el visor (`?scene=synthetic&offscreen=1`). El arnés vive en `tests/e2e/pages/` |
+
 
 ```bash
 npm run test:e2e                # npx playwright test
