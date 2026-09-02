@@ -45,12 +45,15 @@ Later / optional (not in the sidecar today)
 
 | Stage | What | Engine |
 | --- | --- | --- |
-| 1 Decode | PLY / SPLAT / SPZ / … | GaussForge |
+| 1 Decode | PLY (3DGS / 2DGS) / SPLAT / SPZ / … | GaussForge (vendored, offline) → `shared/splat-io.js` fallback |
 | 2 Rasterize | Paper 3DGS ellipses | This WebGPU viewer |
+| 2b Identity (F1) | Label per Gaussian, instance table, ID / depth / normal readback, `pick()` | `gpu-renderer.js`, HUD *Instancias* |
 | 3 Capture | PNG + yaw/pitch/eye | `canvas` snapshot |
 | 4 Tag | Open-vocab names + boxes | `grok-4.6` vision |
 | 5 Cluster | Merge armchair/sofa/seat | name key in sidecar |
 | 6 Cards | Product stills | `grok-imagine-image-2.0` **edits** |
 | 7 Repair (later) | Missing / blurry views | NVIDIA ArtiFixer |
+
+Tests: `npm test` (unit) and `npm run test:e2e` (Chromium WebGPU, offscreen); see [testing.md](testing.md).
 
 Do **not** replace step 2 with Imagine/GPT-Image/Gemini image generation. Those APIs have no camera or opacity, so masks cannot lift back to Gaussians.

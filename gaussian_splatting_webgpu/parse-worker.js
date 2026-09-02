@@ -1,10 +1,19 @@
 import { toGaussianCloud, boundsFromGaussians } from "../shared/splat-io.js";
 
+// Copia vendorizada (vendor/gaussforge/, ver NOTICE.md): funciona sin red.
+const GAUSSFORGE_VENDOR_URL = new URL("../vendor/gaussforge/index.web.js", import.meta.url).href;
+// Respaldo por CDN, sólo si la copia vendorizada no carga.
 const GAUSSFORGE_URL =
   "https://cdn.jsdelivr.net/npm/@gaussforge/wasm@0.6.0/dist/index.web.js";
+// Orden de intento; el último recurso es el decodificador integrado (splat-io.js).
+const GAUSSFORGE_SOURCES = [
+  { source: "vendor", url: GAUSSFORGE_VENDOR_URL },
+  { source: "cdn", url: GAUSSFORGE_URL },
+];
 
-let forge = null;
-let forgeTried = false;
+let forgePromise = null; // carga en curso o resuelta; se comparte entre mensajes concurrentes
+let forgeSource = ""; // "vendor" | "cdn" una vez cargado
+let forgeLoadError = "";
 let lastInput = null;
 
 function sigmoid(x) {
@@ -93,6 +102,7 @@ function finishCloud(cloud, extra) {
   const reduced = downsampleCloud(cloud.gaussians, cloud.sh, extra.compression);
   return {
     decoder: extra.decoder,
+    decoderSource: extra.decoderSource || "",
     format: extra.format,
     shDegree: cloud.shDegree,
     count: reduced.count,
@@ -104,18 +114,49 @@ function finishCloud(cloud, extra) {
   };
 }
 
-async function getForge() {
-  if (forge) return forge;
-  if (forgeTried) return null;
-  forgeTried = true;
-  const mod = await import(GAUSSFORGE_URL);
-  forge = await mod.createGaussForge();
-  return forge;
+function errorText(err) {
+  return err && err.message ? err.message : String(err);
+}
+
+async function loadForgeFrom(entry) {
+  const mod = await import(entry.url);
+  if (typeof mod.createGaussForge !== "function") {
+    throw new Error("el módulo no exporta createGaussForge");
+  }
+  return mod.createGaussForge();
+}
+
+// Intenta cada origen en orden; devuelve la instancia o lanza con todos los motivos.
+async function loadForge() {
+  const errors = [];
+  for (const entry of GAUSSFORGE_SOURCES) {
+    try {
+      const gf = await loadForgeFrom(entry);
+      const version = gf.getVersion ? gf.getVersion() : "?";
+      console.info(`[parse-worker] GaussForge ${version} cargado desde ${entry.source} (${entry.url})`);
+      forgeSource = entry.source;
+      return gf;
+    } catch (err) {
+      const msg = errorText(err);
+      errors.push(`${entry.source}: ${msg}`);
+      console.warn(`[parse-worker] GaussForge no cargó desde ${entry.source} (${entry.url}): ${msg}`);
+    }
+  }
+  forgeLoadError = errors.join("; ");
+  console.warn(`[parse-worker] GaussForge no disponible; se usará el decodificador integrado (${forgeLoadError})`);
+  throw new Error(`GaussForge WASM unavailable (${forgeLoadError})`);
+}
+
+// Memoriza la promesa (no un booleano): los mensajes que llegan mientras el
+// módulo aún se importa esperan la misma carga en vez de caer al decodificador
+// integrado. Si falla, la promesa rechazada se conserva y todos ven el mismo motivo.
+function getForge() {
+  if (!forgePromise) forgePromise = loadForge();
+  return forgePromise;
 }
 
 async function decodeWithForge(buffer, name, compression) {
   const gf = await getForge();
-  if (!gf) throw new Error("GaussForge WASM unavailable");
   const format = detectGaussFormat(buffer, name);
   const bytes = new Uint8Array(buffer instanceof Uint8Array ? buffer : buffer);
   lastInput = { bytes: new Uint8Array(bytes), format, name };
@@ -125,6 +166,7 @@ async function decodeWithForge(buffer, name, compression) {
   if (!ir || !ir.numPoints) throw new Error("GaussForge returned an empty cloud");
   return finishCloud(irToCloud(ir), {
     decoder: "gaussforge",
+    decoderSource: forgeSource,
     format,
     compression,
     warning: result.warning || "",
@@ -148,7 +190,6 @@ self.onmessage = async (event) => {
   if (data.type === "convert") {
     try {
       const gf = await getForge();
-      if (!gf) throw new Error("GaussForge WASM unavailable");
       if (!lastInput) throw new Error("No decoded model to export");
       const converted = await gf.convert(lastInput.bytes, lastInput.format, data.outFormat || "ply");
       if (converted.error) throw new Error(converted.error);
@@ -157,12 +198,7 @@ self.onmessage = async (event) => {
         [converted.data.buffer]
       );
     } catch (err) {
-      self.postMessage({
-        id,
-        ok: false,
-        type: "convert",
-        error: err && err.message ? err.message : String(err),
-      });
+      self.postMessage({ id, ok: false, type: "convert", error: errorText(err) });
     }
     return;
   }
@@ -172,16 +208,13 @@ self.onmessage = async (event) => {
     try {
       decoded = await decodeWithForge(data.buffer, data.name || "", data.compression || 1);
     } catch (forgeErr) {
+      console.warn(`[parse-worker] GaussForge falló con ${data.name || "?"}: ${errorText(forgeErr)}`);
       decoded = decodeFallback(data.buffer, data.name || "", data.compression || 1);
-      decoded.warning = `GaussForge: ${forgeErr.message || forgeErr}; used built-in decoder`;
+      decoded.warning = `GaussForge: ${errorText(forgeErr)}; used built-in decoder`;
     }
     const transfer = [decoded.gaussians.buffer, decoded.sh.buffer];
     self.postMessage({ id, ok: true, ...decoded }, transfer);
   } catch (err) {
-    self.postMessage({
-      id,
-      ok: false,
-      error: err && err.message ? err.message : String(err),
-    });
+    self.postMessage({ id, ok: false, error: errorText(err) });
   }
 };

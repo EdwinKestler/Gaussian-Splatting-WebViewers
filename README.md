@@ -2,7 +2,7 @@
 
 Experimental browser viewers for [3D Gaussian Splatting for Real-Time Radiance Field Rendering](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/).
 
-The original Three.js and A-Frame demos are still here. A new **WebGPU 3DGS viewer** uses [GaussForge](https://github.com/3dgscloud/GaussForge) to decode PLY / SPLAT / SPZ / KSPLAT / SOG, then sorts and rasterizes on the GPU.
+The original Three.js and A-Frame demos are still here. A new **WebGPU 3DGS viewer** uses [GaussForge](https://github.com/3dgscloud/GaussForge) to decode PLY / SPLAT / SPZ / KSPLAT / SOG, then sorts and rasterizes on the GPU. GaussForge is vendored under `vendor/gaussforge/` (Apache-2.0, single-file WASM build), so the viewer decodes every format without network access; the jsDelivr copy is only a fallback.
 
 Serve the repo from the **repository root** (the WebGPU worker imports `../shared/splat-io.js`, so `file://` and serving only the subfolder will fail):
 
@@ -11,7 +11,7 @@ cd Gaussian-Splatting-WebViewers
 python3 -m http.server 8090 --bind 127.0.0.1
 ```
 
-Then open [http://127.0.0.1:8090/](http://127.0.0.1:8090/) or the WebGPU viewer at [http://127.0.0.1:8090/gaussian_splatting_webgpu/?url=../splats/model.splat](http://127.0.0.1:8090/gaussian_splatting_webgpu/?url=../splats/model.splat). Default scene is `splats/model.splat`. Pipeline notes: [docs/pipeline.md](docs/pipeline.md). Paper (flowchart, references, attributions): [docs/open-vocab-3dgs-imagine-pipeline-paper.md](docs/open-vocab-3dgs-imagine-pipeline-paper.md) · [PDF](docs/open-vocab-3dgs-imagine-pipeline-paper.pdf).
+Then open [http://127.0.0.1:8090/](http://127.0.0.1:8090/) or the WebGPU viewer at [http://127.0.0.1:8090/gaussian_splatting_webgpu/?url=../splats/model.splat](http://127.0.0.1:8090/gaussian_splatting_webgpu/?url=../splats/model.splat). Default scene is `splats/model.splat`. Pipeline notes: [docs/pipeline.md](docs/pipeline.md). Roadmap for per-Gaussian segmentation, classification, mesh and object editing: [docs/plan-segmentacion-edicion-3dgs.md](docs/plan-segmentacion-edicion-3dgs.md). Paper (flowchart, references, attributions): [docs/open-vocab-3dgs-imagine-pipeline-paper.md](docs/open-vocab-3dgs-imagine-pipeline-paper.md) · [PDF](docs/open-vocab-3dgs-imagine-pipeline-paper.pdf).
 
 ### WebGPU Chrome (Linux / Vulkan)
 
@@ -81,12 +81,27 @@ Shared parser: `shared/splat-io.js`. WebGL viewers still pack to 32-byte rows. T
 - HUD warns when the file is compact `.splat` / SH0 so it cannot match the official viewer
 - Export back through GaussForge (PLY / SPLAT / SPZ / KSPLAT / SOG)
 - Falls back to `shared/splat-io.js` (`toGaussianCloud`) if WASM cannot load
+- Reads 2D Gaussian Splatting PLYs (two log-scales) and plain point-cloud PLYs (`variant` reported by `describePly`)
+- **Identity layer (plan F1):** a `u32` label per Gaussian plus an instance table (rigid transform, tint, visible/selected) in the shader; output modes colour / depth / normal / ID with `renderOffscreen()` readback and `pick(x, y)`; HUD panel **Instancias** (click selects, *Aislar* / *Ocultar* / *Teñir*, `Escena sintética (2 esferas)`)
+- `?offscreen=1` skips the canvas context (headless SwiftShader tests); `selftest.html` renders offscreen and reports `SELFTEST_OK`
+- `?scene=synthetic` loads the deterministic two-sphere scene from `shared/synthetic.js` (labels 1 = esfera A, 2 = esfera B) used by the F1 acceptance tests
+- Depth mode returns the alpha-weighted *mean* view distance for now; the 2DGS median depth arrives with the K-buffer resolve (plan F3)
 
 **Point cloud debug** is a diagnostic overlay. Leave it unchecked for the radiance-field rendering.
 
 Requires Chrome 113+, Edge 113+, or another browser with WebGPU. If WebGPU is missing, the page links back to the WebGL viewers. Launch instructions: [docs/webgpu-chrome.md](docs/webgpu-chrome.md).
 
 Optional **open-vocab tags** and **Imagine 2.0 object cards**: start `./semantic_sidecar/launch.sh` (reads `XAI_API_KEY` from `.env`, port 8766), then use **Tag scene (Grok)** in the WebGPU HUD. Tags run on captured 3DGS rasters; Imagine only edits those crops. ArtiFixer is a separate local-GPU stage (see `semantic_sidecar/README.md`).
+
+## Tests
+
+```bash
+npm install          # @playwright/test 1.56.1 (browsers are not downloaded)
+npm test             # 46 Node unit tests for shared/splat-io.js
+npm run test:e2e     # 10 Playwright tests on Chromium WebGPU (SwiftShader when no GPU), offscreen rendering only
+```
+
+Details, GPU flags (`WEBGPU_ARGS`) and the SwiftShader canvas caveat: [docs/testing.md](docs/testing.md). Generated outputs go under `artifacts/` (gitignored).
 
 ## A-Frame component
 

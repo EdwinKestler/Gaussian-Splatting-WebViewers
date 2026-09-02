@@ -19,3 +19,11 @@ splats/
 # Chrome scratch profiles
 .cache/
 chrome-webgpu*/
+
+# Generated artefacts (keep the README)
+artifacts/**
+!artifacts/README.md
+
+# Test tooling
+test-results/
+playwright-report/

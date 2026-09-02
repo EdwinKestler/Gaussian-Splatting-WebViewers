@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>F1 identity harness</title>
+  <style>
+    body { margin: 16px; background: #07090d; color: #e8eef8; font: 13px/1.45 monospace; }
+  </style>
+</head>
+<body>
+<!--
+  Página auxiliar de las pruebas e2e de F1 (tests/e2e/f1-identity.spec.mjs).
+
+  Sólo carga ./f1-harness.js y lo expone en window.__f1; la prueba de Playwright
+  crea el renderer (offscreenOnly, nunca configura el canvas) y lee los resultados
+  con page.evaluate(). Debe servirse por http:// con la raíz del repositorio como
+  raíz de documentos (los módulos importan ../../../shared/synthetic.js).
+-->
+<pre id="out">cargando f1-harness.js…</pre>
+<script type="module">
+  const out = document.getElementById("out");
+  try {
+    const f1 = await import("./f1-harness.js");
+    window.__f1 = f1;
+    window.__f1Ready = true;
+    out.textContent = "f1-harness listo (window.__f1). Esta página la conduce Playwright: tests/e2e/f1-identity.spec.mjs";
+  } catch (err) {
+    window.__f1Error = err && err.message ? err.message : String(err);
+    out.textContent = "ERROR cargando f1-harness.js: " + window.__f1Error;
+    console.error(err);
+  }
+</script>
+</body>
+</html>

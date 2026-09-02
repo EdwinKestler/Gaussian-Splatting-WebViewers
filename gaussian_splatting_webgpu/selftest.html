@@ -1,40 +1,296 @@
 <!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"><title>WebGPU splat selftest</title></head>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>WebGPU splat selftest</title>
+  <style>
+    body { margin: 16px; background: #07090d; color: #e8eef8; font: 13px/1.45 monospace; }
+    pre { white-space: pre-wrap; }
+  </style>
+</head>
 <body>
-<pre id="out">starting</pre>
-<canvas id="c" width="640" height="400"></canvas>
+<!--
+  Autoprueba F1 (plan §4): escena sintética de dos esferas, render fuera de pantalla.
+
+  Funciona tanto con GPU real como con SwiftShader headless porque NUNCA usa el
+  contexto WebGPU del canvas (bajo SwiftShader configurarlo pierde el dispositivo):
+  el renderer se inicia con { offscreenOnly: true } y todo se lee con renderOffscreen().
+
+  Resultado en <pre id="out">, en document.title y en window.__selftest:
+    SELFTEST_OK covA=<n> covB=<n> pickA=<label> pickB=<label>
+    SELFTEST_FAIL <motivo>
+-->
+<pre id="out">iniciando…</pre>
 <script type="module">
 const out = document.getElementById("out");
 const log = (m) => { out.textContent += "\n" + m; console.log(m); };
-try {
-  const { toGaussianCloud } = await import("../shared/splat-io.js");
-  const { WebGPUSplatRenderer } = await import("./gpu-renderer.js");
-  const res = await fetch("./demo.ply");
-  log("demo.ply status " + res.status);
-  const buf = await res.arrayBuffer();
-  const parsed = toGaussianCloud(buf, "demo.ply");
-  log("parsed " + parsed.count + " " + parsed.format + " SH" + parsed.shDegree);
-  if (!navigator.gpu) {
-    log("NO_WEBGPU");
-    document.title = "NO_WEBGPU";
-  } else {
-    const renderer = new WebGPUSplatRenderer(document.getElementById("c"));
-    await renderer.init();
-    log("webgpu init ok");
-    renderer.setCloud(parsed.gaussians, parsed.sh, parsed.shDegree);
-    const proj = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]);
-    const view = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,-3,1]);
-    renderer.setCamera(proj, view, [400, 400], [640, 400], [0, 0, 3]);
-    renderer.render();
-    await renderer.device.queue.onSubmittedWorkDone();
-    log("rendered " + parsed.count);
-    document.title = "RENDER_OK " + parsed.count + " SH" + parsed.shDegree;
+
+// ---- cámara (mismas convenciones que main.js: column-major, -z hacia delante) ----
+const W = 512;
+const H = 384;
+const FOV = (50 * Math.PI) / 180;
+const NEAR = 0.05;
+const FAR = 100;
+const EYE = [0, 0, 4];
+const TARGET = [0, 0, 0];
+const UP = [0, 1, 0];
+
+function perspective(fovy, aspect, near, far) {
+  const f = 1 / Math.tan(fovy / 2);
+  const o = new Float32Array(16);
+  o[0] = f / aspect;
+  o[5] = f;
+  o[10] = (far + near) / (near - far);
+  o[11] = -1;
+  o[14] = (2 * far * near) / (near - far);
+  return o;
+}
+
+function normalize3(v) {
+  const l = Math.hypot(v[0], v[1], v[2]) || 1;
+  return [v[0] / l, v[1] / l, v[2] / l];
+}
+
+function cross3(a, b) {
+  return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+}
+
+function lookAt(eye, target, up) {
+  const z = normalize3([eye[0] - target[0], eye[1] - target[1], eye[2] - target[2]]);
+  const x = normalize3(cross3(up, z));
+  const y = cross3(z, x);
+  const o = new Float32Array(16);
+  o[0] = x[0]; o[1] = y[0]; o[2] = z[0]; o[3] = 0;
+  o[4] = x[1]; o[5] = y[1]; o[6] = z[1]; o[7] = 0;
+  o[8] = x[2]; o[9] = y[2]; o[10] = z[2]; o[11] = 0;
+  o[12] = -(x[0] * eye[0] + x[1] * eye[1] + x[2] * eye[2]);
+  o[13] = -(y[0] * eye[0] + y[1] * eye[1] + y[2] * eye[2]);
+  o[14] = -(z[0] * eye[0] + z[1] * eye[1] + z[2] * eye[2]);
+  o[15] = 1;
+  return o;
+}
+
+/** m (column-major 4x4) * v (vec4). */
+function mulVec4(m, v) {
+  return [0, 1, 2, 3].map((r) => m[r] * v[0] + m[4 + r] * v[1] + m[8 + r] * v[2] + m[12 + r] * v[3]);
+}
+
+/** World point → pixel [x, y] (origen arriba-izquierda) con las matrices dadas. */
+function projectToPixel(proj, view, p) {
+  const c = mulVec4(proj, mulVec4(view, [p[0], p[1], p[2], 1]));
+  if (c[3] <= 0) return null;
+  const nx = c[0] / c[3];
+  const ny = c[1] / c[3];
+  return [Math.round((nx * 0.5 + 0.5) * W), Math.round((1 - (ny * 0.5 + 0.5)) * H)];
+}
+
+/** Profundidad de vista (-cam.z) del punto de la superficie más cercano a la cámara. */
+function analyticFrontDepth(view, center, radius) {
+  const dir = normalize3([center[0] - EYE[0], center[1] - EYE[1], center[2] - EYE[2]]);
+  const front = [center[0] - radius * dir[0], center[1] - radius * dir[1], center[2] - radius * dir[2]];
+  return -mulVec4(view, [front[0], front[1], front[2], 1])[2];
+}
+
+// ---- lecturas ----
+function countCoverage(colour, cx, cy, half) {
+  let n = 0;
+  for (let y = cy - half; y <= cy + half; y++) {
+    if (y < 0 || y >= H) continue;
+    for (let x = cx - half; x <= cx + half; x++) {
+      if (x < 0 || x >= W) continue;
+      if (colour.data[(y * W + x) * 4 + 3] > 0) n++;
+    }
   }
-  log("DONE");
+  return n;
+}
+
+function countIdLabel(id, labels, label) {
+  let n = 0;
+  for (let k = 0; k < id.data.length; k++) {
+    const v = id.data[k];
+    if (v && labels[v - 1] === label) n++;
+  }
+  return n;
+}
+
+/** Etiqueta bajo el píxel del id; si está vacío busca en espiral hasta `maxR` píxeles. */
+function labelAtPixel(id, labels, cx, cy, maxR = 6) {
+  for (let r = 0; r <= maxR; r++) {
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+        const x = cx + dx;
+        const y = cy + dy;
+        if (x < 0 || y < 0 || x >= W || y >= H) continue;
+        const v = id.data[y * W + x];
+        if (v) return { label: labels[v - 1], index: v - 1, offset: r };
+      }
+    }
+  }
+  return { label: 0, index: -1, offset: -1 };
+}
+
+function pixelRgba(colour, x, y) {
+  const o = (y * W + x) * 4;
+  return Array.from(colour.data.subarray(o, o + 4));
+}
+
+function finish(result) {
+  window.__selftest = result;
+  document.title = result.ok
+    ? `SELFTEST_OK covA=${result.covA} covB=${result.covB} pickA=${result.pickA} pickB=${result.pickB}`
+    : `SELFTEST_FAIL ${result.reason}`;
+  log(document.title);
+  log("resultado: " + JSON.stringify(result, null, 1));
+}
+
+const result = {
+  ok: false,
+  reason: "",
+  adapter: null,
+  floatFormat: null,
+  lost: null,
+  width: W,
+  height: H,
+  count: 0,
+  centerPxA: null,
+  centerPxB: null,
+  boxPixels: 0,
+  covA: 0,
+  covB: 0,
+  colourA: null,
+  colourB: null,
+  pickA: 0,
+  pickB: 0,
+  pickOffsetA: -1,
+  pickOffsetB: -1,
+  pickApiA: null,
+  pickApiB: null,
+  idPixelsA: 0,
+  idPixelsB: 0,
+  idPixelsBHidden: -1,
+  idPixelsBIsolatedA: -1,
+  depthA: null,
+  depthAnalyticA: null,
+  depthErrA: null,
+  ms: 0,
+};
+
+const t0 = performance.now();
+try {
+  if (!navigator.gpu) {
+    result.reason = "sin WebGPU (navigator.gpu no existe; ¿se sirve por http://?)";
+    finish(result);
+  } else {
+    const adapter = await navigator.gpu.requestAdapter();
+    if (adapter) {
+      const info = adapter.info || {};
+      result.adapter = { vendor: info.vendor || "", architecture: info.architecture || "" };
+      log(`adaptador: vendor=${result.adapter.vendor} architecture=${result.adapter.architecture}`);
+    }
+
+    const { makeTwoSpheres, SPHERE_LABELS } = await import("../shared/synthetic.js");
+    const { WebGPUSplatRenderer, OUTPUT_MODE } = await import("./gpu-renderer.js");
+
+    // El canvas no se añade al documento ni se configura: sólo lo exige el constructor.
+    const renderer = new WebGPUSplatRenderer(document.createElement("canvas"));
+    await renderer.init({ offscreenOnly: true });
+    result.floatFormat = renderer.floatFormat;
+    renderer.device.lost.then((info) => { result.lost = { reason: info.reason, message: info.message }; });
+    log(`renderer offscreenOnly listo · formato flotante ${renderer.floatFormat}`);
+
+    const scene = makeTwoSpheres();
+    result.count = scene.count;
+    renderer.setCloud(scene.gaussians, scene.sh, scene.shDegree);
+    renderer.setLabels(scene.labels);
+    log(`escena sintética: ${scene.count} gaussianas, esferas en ${JSON.stringify(scene.centers)} radio ${scene.radius}`);
+
+    const proj = perspective(FOV, W / H, NEAR, FAR);
+    const view = lookAt(EYE, TARGET, UP);
+    const fy = H / (2 * Math.tan(FOV / 2));
+    renderer.setCamera(proj, view, [fy, fy], [W, H], EYE);
+
+    const [cA, cB] = scene.centers;
+    const pxA = projectToPixel(proj, view, cA);
+    const pxB = projectToPixel(proj, view, cB);
+    result.centerPxA = pxA;
+    result.centerPxB = pxB;
+    // Radio proyectado de cada esfera (px); la caja de cobertura usa la mitad.
+    const depthA = -mulVec4(view, [cA[0], cA[1], cA[2], 1])[2];
+    const radiusPx = (scene.radius * fy) / depthA;
+    const half = Math.max(2, Math.floor(radiusPx * 0.5));
+    result.boxPixels = (2 * half + 1) ** 2;
+    log(`centros proyectados A=${pxA} B=${pxB} · radio ${radiusPx.toFixed(1)} px · caja ±${half} px`);
+
+    // Color: cobertura (alpha > 0) alrededor de cada centro.
+    const colour = await renderer.renderOffscreen({ mode: OUTPUT_MODE.COLOR, width: W, height: H });
+    result.covA = countCoverage(colour, pxA[0], pxA[1], half);
+    result.covB = countCoverage(colour, pxB[0], pxB[1], half);
+    result.colourA = pixelRgba(colour, pxA[0], pxA[1]);
+    result.colourB = pixelRgba(colour, pxB[0], pxB[1]);
+    log(`cobertura color A=${result.covA}/${result.boxPixels} B=${result.covB}/${result.boxPixels} · rgba A=${result.colourA} B=${result.colourB}`);
+
+    // ID: etiqueta en el píxel del centro (búsqueda en espiral por si cae en un hueco).
+    const id = await renderer.renderOffscreen({ mode: OUTPUT_MODE.ID, width: W, height: H });
+    const hitA = labelAtPixel(id, scene.labels, pxA[0], pxA[1]);
+    const hitB = labelAtPixel(id, scene.labels, pxB[0], pxB[1]);
+    result.pickA = hitA.label;
+    result.pickB = hitB.label;
+    result.pickOffsetA = hitA.offset;
+    result.pickOffsetB = hitB.offset;
+    result.idPixelsA = countIdLabel(id, scene.labels, SPHERE_LABELS.A);
+    result.idPixelsB = countIdLabel(id, scene.labels, SPHERE_LABELS.B);
+    log(`id: A→etiqueta ${hitA.label} (gaussiana ${hitA.index}, desplazamiento ${hitA.offset} px) · B→etiqueta ${hitB.label} (gaussiana ${hitB.index}, desplazamiento ${hitB.offset} px)`);
+    log(`píxeles id por etiqueta: A=${result.idPixelsA} B=${result.idPixelsB}`);
+
+    // pick() del renderer en los mismos píxeles (misma cámara/viewport).
+    const apiA = await renderer.pick(pxA[0], pxA[1]);
+    const apiB = await renderer.pick(pxB[0], pxB[1]);
+    result.pickApiA = apiA;
+    result.pickApiB = apiB;
+    log(`renderer.pick: A=${JSON.stringify(apiA)} B=${JSON.stringify(apiB)}`);
+
+    // Profundidad esperada en el centro de A frente al valor analítico (frente de la esfera).
+    const depth = await renderer.renderOffscreen({ mode: OUTPUT_MODE.DEPTH, width: W, height: H });
+    const pA = pxA[1] * W + pxA[0];
+    result.depthA = depth.alpha[pA] > 0 ? depth.data[pA] : null;
+    result.depthAnalyticA = analyticFrontDepth(view, cA, scene.radius);
+    result.depthErrA = result.depthA == null ? null : Math.abs(result.depthA - result.depthAnalyticA) / result.depthAnalyticA;
+    log(`profundidad A: medida ${result.depthA} · analítica ${result.depthAnalyticA.toFixed(4)} · error ${result.depthErrA == null ? "n/d" : (result.depthErrA * 100).toFixed(2) + " %"}`);
+
+    // Ocultar B → sin píxeles id de B; aislar A → tampoco.
+    renderer.setInstance(SPHERE_LABELS.B, { visible: false });
+    const idHidden = await renderer.renderOffscreen({ mode: OUTPUT_MODE.ID, width: W, height: H });
+    result.idPixelsBHidden = countIdLabel(idHidden, scene.labels, SPHERE_LABELS.B);
+    renderer.setInstance(SPHERE_LABELS.B, { visible: true });
+    renderer.setParams({ isolateLabel: SPHERE_LABELS.A });
+    const idIsolated = await renderer.renderOffscreen({ mode: OUTPUT_MODE.ID, width: W, height: H });
+    result.idPixelsBIsolatedA = countIdLabel(idIsolated, scene.labels, SPHERE_LABELS.B);
+    renderer.setParams({ isolateLabel: 0 });
+    log(`ocultar B → píxeles id de B: ${result.idPixelsBHidden} · aislar A → píxeles id de B: ${result.idPixelsBIsolatedA}`);
+
+    await renderer.device.queue.onSubmittedWorkDone();
+    await new Promise((r) => setTimeout(r, 100));
+    result.ms = Math.round(performance.now() - t0);
+
+    const failures = [];
+    if (result.lost) failures.push(`dispositivo perdido: ${result.lost.message}`);
+    if (result.covA === 0) failures.push("sin cobertura de color en la esfera A");
+    if (result.covB === 0) failures.push("sin cobertura de color en la esfera B");
+    if (result.pickA !== SPHERE_LABELS.A) failures.push(`pickA=${result.pickA} (esperado ${SPHERE_LABELS.A})`);
+    if (result.pickB !== SPHERE_LABELS.B) failures.push(`pickB=${result.pickB} (esperado ${SPHERE_LABELS.B})`);
+    if (result.depthErrA == null) failures.push("sin profundidad en el centro de A");
+    else if (result.depthErrA >= 0.01) failures.push(`error de profundidad ${(result.depthErrA * 100).toFixed(2)} % (criterio F1: < 1 %)`);
+    if (result.idPixelsBHidden !== 0) failures.push(`ocultar B deja ${result.idPixelsBHidden} píxeles id`);
+    if (result.idPixelsBIsolatedA !== 0) failures.push(`aislar A deja ${result.idPixelsBIsolatedA} píxeles id de B`);
+    result.ok = failures.length === 0;
+    result.reason = failures.join("; ");
+    finish(result);
+  }
 } catch (err) {
+  result.reason = "excepción: " + (err && err.message ? err.message : String(err));
   log("ERROR " + (err && err.stack ? err.stack : err));
-  document.title = "ERROR";
+  finish(result);
 }
 </script>
 </body>

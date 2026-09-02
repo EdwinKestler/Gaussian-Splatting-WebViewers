@@ -2,19 +2,178 @@
  * Shared Gaussian splat I/O.
  *
  * Understands:
- *   - INRIA / 3DGS .ply (binary LE, binary BE, ASCII)
+ *   - INRIA / 3DGS .ply (binary LE, binary BE, ASCII), SH degree 0..3
+ *   - 2DGS .ply (hbb1/2d-gaussian-splatting: scale_0, scale_1 only)
+ *   - plain point-cloud .ply (x y z + red green blue, no scale_*)
  *   - 32-byte .splat  (antimatter15 / Viewer 1 / converter)
  *   - 44-byte .splat  (early GaussianSplats3D / Viewer 2)
  *
  * Always emits a packed 32-byte buffer:
  *   xyz f32, scale f32, rgba u8, quat u8 (wxyz, mapped from [-1,1] to [0,255])
+ *
+ * Every parsed result carries `format` ("ply" | "splat32" | "splat44") and
+ * `variant` ("3dgs" | "2dgs" | "pointcloud"); .splat files are always "3dgs".
  */
 
 export const SPLAT32_ROW = 32;
 const SH_C0 = 0.28209479177387814;
 
+/** Linear scale used for PLYs without scale_* (plain point clouds). */
+const POINT_SCALE = 0.01;
+
+/**
+ * 2DGS PLYs store only two log-scales: each primitive is a flat disk spanned by
+ * the first two rotated axes, with the third axis as its normal. The renderers
+ * here build a full 3x3 covariance from three scales, so the missing third
+ * scale is synthesised as a very thin slab *relative to the disk itself*:
+ * sz = min(sx, sy) * THIN_DISK_RATIO. A relative value (instead of a fixed
+ * exp(-1e6)-style constant) keeps the disk thin at any scene scale while
+ * surviving the log/exp round trip of packedToPly (which floors scales at 1e-8)
+ * and float32 storage without degenerating the covariance.
+ */
+export const THIN_DISK_RATIO = 1e-4;
+const THIN_DISK_FLOOR = 1e-8;
+
+const BYTE_TYPES = new Set(["uchar", "uint8", "char", "int8"]);
+
 function sigmoid(x) {
   return 1 / (1 + Math.exp(-x));
+}
+
+/** Third (normal) scale for a 2DGS disk of linear extents sx, sy. */
+export function thinDiskScale(sx, sy) {
+  const s = Math.min(Math.abs(sx), Math.abs(sy));
+  return Math.max(s * THIN_DISK_RATIO, THIN_DISK_FLOOR);
+}
+
+/**
+ * Classify a PLY vertex layout from its property names:
+ *   "3dgs"       scale_0..scale_2 (a lone scale_0 is treated as isotropic 3DGS)
+ *   "2dgs"       scale_0 and scale_1 but no scale_2
+ *   "pointcloud" no scale_* at all
+ */
+export function plyVariantFromProperties(names) {
+  const set = new Set(names);
+  if (!set.has("scale_0")) return "pointcloud";
+  if (set.has("scale_1") && !set.has("scale_2")) return "2dgs";
+  return "3dgs";
+}
+
+function isPlyMagic(u8) {
+  return u8.length >= 3 && u8[0] === 0x70 && u8[1] === 0x6c && u8[2] === 0x79;
+}
+
+/** Accept (Shared)ArrayBuffer or any ArrayBufferView; always return a buffer. */
+function asArrayBuffer(input) {
+  if (input instanceof ArrayBuffer) return input;
+  if (typeof SharedArrayBuffer !== "undefined" && input instanceof SharedArrayBuffer) return input;
+  if (ArrayBuffer.isView(input)) {
+    if (input.byteOffset === 0 && input.byteLength === input.buffer.byteLength) return input.buffer;
+    return input.buffer.slice(input.byteOffset, input.byteOffset + input.byteLength);
+  }
+  throw new TypeError("Expected an ArrayBuffer or a typed array");
+}
+
+/** Per-property byte offsets, types and row size for a binary PLY vertex. */
+function indexProperties(properties) {
+  const offsets = {};
+  const types = {};
+  let rowSize = 0;
+  for (const p of properties) {
+    offsets[p.name] = rowSize;
+    types[p.name] = p.type;
+    rowSize += TYPE_SIZE[p.type] || 4;
+  }
+  const has = (name) => Object.prototype.hasOwnProperty.call(offsets, name);
+  return { offsets, types, rowSize, has };
+}
+
+function countRestCoefficients(has) {
+  let n = 0;
+  while (has(`f_rest_${n}`)) n += 1;
+  return n;
+}
+
+/** f_rest_* count -> SH degree (3 per colour channel = degree 1, 8 = 2, 15 = 3). */
+function shDegreeFromRestCount(nRest) {
+  const perColor = nRest / 3;
+  if (perColor >= 15) return 3;
+  if (perColor >= 8) return 2;
+  if (perColor >= 3) return 1;
+  return 0;
+}
+
+/**
+ * Linear (exp) scales for one vertex, written to out[o..o+2] (a Float32Array,
+ * so values that overflow float32 count as non-finite). `get(name)` returns
+ * the raw log-scale.
+ *   3dgs: exp(scale_0..2); a lone scale_0 is broadcast (isotropic)
+ *   2dgs: exp(scale_0..1) + synthesised thin third axis
+ *   pointcloud: fixed POINT_SCALE
+ *
+ * Returns false when any scale is non-finite. Trained PLYs can carry diverged
+ * gaussians with NaN/Infinity log-scales; both parsers hide such rows the same
+ * way (scales 0, opacity 0) so neither a NaN nor a bogus exp(0) = 1 blob
+ * reaches the renderers.
+ */
+function writeLinearScales(out, o, get, has, variant) {
+  if (variant === "pointcloud") {
+    out[o] = out[o + 1] = out[o + 2] = POINT_SCALE;
+    return true;
+  }
+  const sx = Math.exp(get("scale_0"));
+  let sy;
+  let sz;
+  if (variant === "2dgs") {
+    sy = Math.exp(get("scale_1"));
+    sz = thinDiskScale(sx, sy);
+  } else {
+    sy = has("scale_1") ? Math.exp(get("scale_1")) : sx;
+    sz = has("scale_2") ? Math.exp(get("scale_2")) : sy;
+  }
+  out[o] = sx;
+  out[o + 1] = sy;
+  out[o + 2] = sz;
+  if (Number.isFinite(out[o]) && Number.isFinite(out[o + 1]) && Number.isFinite(out[o + 2])) return true;
+  out[o] = out[o + 1] = out[o + 2] = 0;
+  return false;
+}
+
+/**
+ * red/green/blue -> [0,1]. Byte-typed properties are always /255; float colours
+ * are assumed to be in [0,1] unless any channel exceeds 1 (then /255).
+ */
+function unitColor(r, g, b, type) {
+  if (BYTE_TYPES.has(type) || r > 1 || g > 1 || b > 1) return [r / 255, g / 255, b / 255];
+  return [r, g, b];
+}
+
+/** Round to the nearest byte (Uint8Array assignment would otherwise truncate). */
+function clampByte(v) {
+  return Math.max(0, Math.min(255, Math.round(v)));
+}
+
+/** Throw a clear error when the body is shorter than the header promises. */
+function assertBinaryBody(buffer, headerEnd, vertexCount, rowSize) {
+  const available = buffer.byteLength - headerEnd;
+  const needed = vertexCount * rowSize;
+  if (available < needed) {
+    throw new Error(
+      `PLY body truncated: header declares ${vertexCount} vertices x ${rowSize} bytes ` +
+        `(${needed} bytes) but only ${available} bytes follow end_header`
+    );
+  }
+}
+
+function asciiRows(buffer, headerEnd, vertexCount) {
+  const text = new TextDecoder().decode(new Uint8Array(buffer, headerEnd));
+  const lines = text.split(/\r?\n/).filter((l) => l.trim().length);
+  if (lines.length < vertexCount) {
+    throw new Error(
+      `PLY ASCII body truncated: header declares ${vertexCount} vertices but only ${lines.length} rows follow end_header`
+    );
+  }
+  return lines;
 }
 
 function looksLikeSplat44(buffer) {
@@ -24,10 +183,11 @@ function looksLikeSplat44(buffer) {
   return n > 0.4 && n < 1.6 && Number.isFinite(n);
 }
 
-export function detectFormat(buffer, filename = "") {
+export function detectFormat(input, filename = "") {
+  const buffer = asArrayBuffer(input);
   const name = String(filename).toLowerCase();
   const u8 = new Uint8Array(buffer);
-  if (name.endsWith(".ply") || (u8[0] === 0x70 && u8[1] === 0x6c && u8[2] === 0x79)) {
+  if (name.endsWith(".ply") || isPlyMagic(u8)) {
     return "ply";
   }
   const len = buffer.byteLength;
@@ -39,7 +199,6 @@ export function detectFormat(buffer, filename = "") {
     if (div44 && looksLikeSplat44(buffer)) return "splat44";
     if (div32) return "splat32";
   }
-  if (u8[0] === 0x70 && u8[1] === 0x6c && u8[2] === 0x79) return "ply";
   if (div44 && !div32) return "splat44";
   if (div32) return "splat32";
   throw new Error(`Unrecognized splat format (${len} bytes, name="${filename}")`);
@@ -197,25 +356,15 @@ function readNumeric(view, offset, type, le) {
   }
 }
 
+/** Parse a PLY into 32-byte rows (sorted by volume x opacity). Returns { packed, variant }. */
 function plyToPacked(buffer) {
   const { format, vertexCount, properties, headerEnd } = decodePlyHeader(buffer);
-  const fieldSize = properties.map((p) => TYPE_SIZE[p.type] || 4);
-  const rowSize = fieldSize.reduce((a, b) => a + b, 0);
-  const offsets = {};
-  let acc = 0;
-  for (let i = 0; i < properties.length; i++) {
-    offsets[properties[i].name] = acc;
-    acc += fieldSize[i];
-  }
-  const types = {};
-  for (const p of properties) types[p.name] = p.type;
-
-  const has = (name) => Object.prototype.hasOwnProperty.call(offsets, name);
+  const { offsets, types, rowSize, has } = indexProperties(properties);
+  const variant = plyVariantFromProperties(properties.map((p) => p.name));
   const raw = new Array(vertexCount);
 
   if (format === "ascii") {
-    const text = new TextDecoder().decode(new Uint8Array(buffer, headerEnd));
-    const lines = text.split(/\r?\n/).filter((l) => l.trim().length);
+    const lines = asciiRows(buffer, headerEnd, vertexCount);
     for (let i = 0; i < vertexCount; i++) {
       const parts = lines[i].trim().split(/\s+/);
       const rec = {};
@@ -226,36 +375,33 @@ function plyToPacked(buffer) {
     }
   } else {
     const le = format === "binary_le";
+    assertBinaryBody(buffer, headerEnd, vertexCount, rowSize);
     const view = new DataView(buffer, headerEnd);
     for (let i = 0; i < vertexCount; i++) {
       const base = i * rowSize;
       const rec = {};
       for (const p of properties) {
         rec[p.name] = readNumeric(view, base + offsets[p.name], p.type, le);
-        if (p.type === "uchar" || p.type === "uint8") {
-          if (p.name === "red" || p.name === "green" || p.name === "blue" || p.name === "alpha") {
-            rec[p.name] = rec[p.name] / 255;
-          }
-        }
       }
       raw[i] = rec;
     }
   }
 
+  const scales = new Float32Array(vertexCount * 3);
+  const visible = new Uint8Array(vertexCount);
   const sizeList = new Float32Array(vertexCount);
   const order = new Uint32Array(vertexCount);
+  let rec = null;
+  const get = (name) => rec[name];
   for (let i = 0; i < vertexCount; i++) {
     order[i] = i;
-    const r = raw[i];
-    if (!has("scale_0")) {
-      sizeList[i] = 0;
-      continue;
-    }
-    const sx = Math.exp(r.scale_0);
-    const sy = Math.exp(r.scale_1);
-    const sz = Math.exp(r.scale_2);
-    const op = has("opacity") ? sigmoid(r.opacity) : 1;
-    sizeList[i] = sx * sy * sz * op;
+    rec = raw[i];
+    visible[i] = writeLinearScales(scales, i * 3, get, has, variant) ? 1 : 0;
+    // sizeList stays 0 for point clouds and hidden (non-finite scale) rows
+    if (variant === "pointcloud" || !visible[i]) continue;
+    const op = has("opacity") ? sigmoid(rec.opacity) : 1;
+    const vol = scales[i * 3] * scales[i * 3 + 1] * scales[i * 3 + 2] * op;
+    sizeList[i] = Number.isFinite(vol) ? vol : 0;
   }
   order.sort((a, b) => sizeList[b] - sizeList[a]);
 
@@ -263,35 +409,32 @@ function plyToPacked(buffer) {
   const dstF = new Float32Array(packed.buffer);
 
   for (let j = 0; j < vertexCount; j++) {
-    const r = raw[order[j]];
+    const src = order[j];
+    const r = raw[src];
     const df = j * 8;
     const db = j * SPLAT32_ROW;
     dstF[df] = r.x || 0;
     dstF[df + 1] = r.y || 0;
     dstF[df + 2] = r.z || 0;
-    if (has("scale_0")) {
-      dstF[df + 3] = Math.exp(r.scale_0);
-      dstF[df + 4] = Math.exp(r.scale_1);
-      dstF[df + 5] = Math.exp(r.scale_2);
-    } else {
-      dstF[df + 3] = dstF[df + 4] = dstF[df + 5] = 0.01;
-    }
+    dstF[df + 3] = scales[src * 3];
+    dstF[df + 4] = scales[src * 3 + 1];
+    dstF[df + 5] = scales[src * 3 + 2];
     if (has("f_dc_0")) {
-      packed[db + 24] = Math.max(0, Math.min(255, (0.5 + SH_C0 * r.f_dc_0) * 255));
-      packed[db + 25] = Math.max(0, Math.min(255, (0.5 + SH_C0 * r.f_dc_1) * 255));
-      packed[db + 26] = Math.max(0, Math.min(255, (0.5 + SH_C0 * r.f_dc_2) * 255));
+      packed[db + 24] = clampByte((0.5 + SH_C0 * r.f_dc_0) * 255);
+      packed[db + 25] = clampByte((0.5 + SH_C0 * r.f_dc_1) * 255);
+      packed[db + 26] = clampByte((0.5 + SH_C0 * r.f_dc_2) * 255);
     } else if (has("red")) {
-      packed[db + 24] = Math.max(0, Math.min(255, (r.red <= 1 ? r.red * 255 : r.red)));
-      packed[db + 25] = Math.max(0, Math.min(255, (r.green <= 1 ? r.green * 255 : r.green)));
-      packed[db + 26] = Math.max(0, Math.min(255, (r.blue <= 1 ? r.blue * 255 : r.blue)));
+      const [cr, cg, cb] = unitColor(r.red, r.green, r.blue, types.red);
+      packed[db + 24] = clampByte(cr * 255);
+      packed[db + 25] = clampByte(cg * 255);
+      packed[db + 26] = clampByte(cb * 255);
     } else {
       packed[db + 24] = 255;
       packed[db + 25] = 32;
       packed[db + 26] = 32;
     }
-    packed[db + 27] = has("opacity")
-      ? Math.max(0, Math.min(255, sigmoid(r.opacity) * 255))
-      : 255;
+    if (!visible[src]) packed[db + 27] = 0;
+    else packed[db + 27] = has("opacity") ? clampByte(sigmoid(r.opacity) * 255) : 255;
     if (has("rot_0")) {
       packQuatU8(packed, db + 28, r.rot_0, r.rot_1, r.rot_2, r.rot_3);
     } else {
@@ -301,20 +444,23 @@ function plyToPacked(buffer) {
       packed[db + 31] = 128;
     }
   }
-  return packed;
+  return { packed, variant };
 }
 
-export function toSplat32(buffer, filename = "", options = {}) {
+export function toSplat32(input, filename = "", options = {}) {
+  const buffer = asArrayBuffer(input);
   const compression = options.compression ?? 1;
   const fmt = detectFormat(buffer, filename);
   let packed;
-  if (fmt === "ply") packed = plyToPacked(buffer);
+  let variant = "3dgs";
+  if (fmt === "ply") ({ packed, variant } = plyToPacked(buffer));
   else if (fmt === "splat44") packed = splat44ToPacked(buffer);
   else packed = splat32ToPacked(buffer);
   packed = downsamplePacked(packed, compression);
   const count = packed.byteLength / SPLAT32_ROW;
   return {
     format: fmt,
+    variant,
     packed,
     count,
     bounds: boundsFromPacked(packed),
@@ -475,30 +621,18 @@ function packedToCloud(packed) {
     count: n,
     bounds: boundsFromGaussians(gaussians),
     format: "splat32",
+    variant: "3dgs",
   };
 }
 
 function plyToCloud(buffer) {
   const { format, vertexCount, properties, headerEnd } = decodePlyHeader(buffer);
-  const fieldSize = properties.map((p) => TYPE_SIZE[p.type] || 4);
-  const rowSize = fieldSize.reduce((a, b) => a + b, 0);
-  const offsets = {};
-  const types = {};
-  let acc = 0;
-  for (const p of properties) {
-    offsets[p.name] = acc;
-    types[p.name] = p.type;
-    acc += TYPE_SIZE[p.type] || 4;
-  }
-  const has = (name) => Object.prototype.hasOwnProperty.call(offsets, name);
+  const { offsets, types, rowSize, has } = indexProperties(properties);
+  const variant = plyVariantFromProperties(properties.map((p) => p.name));
 
-  let nRest = 0;
-  while (has(`f_rest_${nRest}`)) nRest += 1;
+  const nRest = countRestCoefficients(has);
   const nCoeffsPerColor = nRest / 3;
-  let shDegree = 0;
-  if (nCoeffsPerColor >= 15) shDegree = 3;
-  else if (nCoeffsPerColor >= 8) shDegree = 2;
-  else if (nCoeffsPerColor >= 3) shDegree = 1;
+  const shDegree = shDegreeFromRestCount(nRest);
 
   const gaussians = new Float32Array(vertexCount * GAUSSIAN_STRIDE);
   const sh = new Float32Array(vertexCount * SH_STRIDE);
@@ -508,14 +642,9 @@ function plyToCloud(buffer) {
     gaussians[g] = get("x");
     gaussians[g + 1] = get("y");
     gaussians[g + 2] = get("z");
-    gaussians[g + 3] = has("opacity") ? sigmoid(get("opacity")) : 1;
-    if (has("scale_0")) {
-      gaussians[g + 4] = Math.exp(get("scale_0"));
-      gaussians[g + 5] = Math.exp(get("scale_1"));
-      gaussians[g + 6] = Math.exp(get("scale_2"));
-    } else {
-      gaussians[g + 4] = gaussians[g + 5] = gaussians[g + 6] = 0.01;
-    }
+    const visible = writeLinearScales(gaussians, g + 4, get, has, variant);
+    if (!visible) gaussians[g + 3] = 0;
+    else gaussians[g + 3] = has("opacity") ? sigmoid(get("opacity")) : 1;
     if (has("rot_0")) {
       const qw = get("rot_0");
       const qx = get("rot_1");
@@ -535,14 +664,7 @@ function plyToCloud(buffer) {
       sh[s + 1] = get("f_dc_1");
       sh[s + 2] = get("f_dc_2");
     } else if (has("red")) {
-      let r = get("red");
-      let gch = get("green");
-      let b = get("blue");
-      if (r > 1 || gch > 1 || b > 1) {
-        r /= 255;
-        gch /= 255;
-        b /= 255;
-      }
+      const [r, gch, b] = unitColor(get("red"), get("green"), get("blue"), types.red);
       sh[s] = (r - 0.5) / SH_C0;
       sh[s + 1] = (gch - 0.5) / SH_C0;
       sh[s + 2] = (b - 0.5) / SH_C0;
@@ -556,17 +678,18 @@ function plyToCloud(buffer) {
   };
 
   if (format === "ascii") {
-    const text = new TextDecoder().decode(new Uint8Array(buffer, headerEnd));
-    const lines = text.split(/\r?\n/).filter((l) => l.trim().length);
+    const lines = asciiRows(buffer, headerEnd, vertexCount);
     const names = properties.map((p) => p.name);
     for (let i = 0; i < vertexCount; i++) {
       const parts = lines[i].trim().split(/\s+/);
       const rec = {};
       for (let p = 0; p < names.length; p++) rec[names[p]] = parseFloat(parts[p]);
-      fill(i, (name) => (rec[name] !== undefined && rec[name] !== null ? rec[name] : 0));
+      // raw values, like the binary path, so NaN/inf tokens are handled identically
+      fill(i, (name) => (has(name) ? rec[name] : 0));
     }
   } else {
     const le = format === "binary_le";
+    assertBinaryBody(buffer, headerEnd, vertexCount, rowSize);
     const view = new DataView(buffer, headerEnd);
     for (let i = 0; i < vertexCount; i++) {
       const base = i * rowSize;
@@ -583,6 +706,31 @@ function plyToCloud(buffer) {
     count: vertexCount,
     bounds: boundsFromGaussians(gaussians),
     format: "ply",
+    variant,
+  };
+}
+
+/**
+ * Header-only summary of a PLY for HUDs and tests (no vertex data is decoded):
+ *   { vertexCount, properties: [names], shDegree, variant, encoding }
+ * `encoding` is "binary_le" | "binary_be" | "ascii". Throws if the buffer does
+ * not start with the "ply" magic or its header is malformed.
+ */
+export function describePly(input) {
+  const buffer = asArrayBuffer(input);
+  if (!isPlyMagic(new Uint8Array(buffer))) {
+    throw new Error("Not a PLY buffer (missing 'ply' magic)");
+  }
+  const header = decodePlyHeader(buffer);
+  const properties = header.properties.map((p) => p.name);
+  const set = new Set(properties);
+  const has = (name) => set.has(name);
+  return {
+    vertexCount: header.vertexCount,
+    properties,
+    shDegree: shDegreeFromRestCount(countRestCoefficients(has)),
+    variant: plyVariantFromProperties(properties),
+    encoding: header.format,
   };
 }
 
@@ -590,7 +738,8 @@ function plyToCloud(buffer) {
  * Full-precision 3DGS cloud: float covariance + SH0–3.
  * Compact .splat files only recover SH degree 0.
  */
-export function toGaussianCloud(buffer, filename = "") {
+export function toGaussianCloud(input, filename = "") {
+  const buffer = asArrayBuffer(input);
   const fmt = detectFormat(buffer, filename);
   if (fmt === "ply") return plyToCloud(buffer);
   const packed = fmt === "splat44" ? splat44ToPacked(buffer) : splat32ToPacked(buffer);
