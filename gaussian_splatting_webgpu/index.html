@@ -174,6 +174,33 @@
     #sem-cards figure { margin: 0; }
     #sem-cards img { width: 100%; border-radius: 8px; display: block; background: #111; }
     #sem-cards figcaption { font-size: 11px; color: var(--muted); margin-top: 4px; }
+    /* Instancias (plan F1): lista de instancias, selección y controles por fila. */
+    #inst-panel { margin: 12px 0 4px; padding-top: 10px; border-top: 1px solid var(--line); }
+    #inst-panel h2 { margin: 0 0 2px; font-size: 13px; font-weight: 650; }
+    #inst-panel .inst-hint { margin: 0 0 4px; color: var(--muted); font-size: 11px; }
+    #inst-status { margin: 4px 0 6px; min-height: 1.4em; color: var(--accent); font-variant-numeric: tabular-nums; }
+    #inst-list { display: flex; flex-direction: column; gap: 4px; }
+    .inst-empty { color: var(--muted); font-size: 11px; }
+    .inst-row {
+      display: grid;
+      grid-template-columns: 12px auto 1fr auto;
+      gap: 4px 8px;
+      align-items: center;
+      padding: 5px 7px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    .inst-row:hover { border-color: rgba(126, 224, 200, 0.5); }
+    .inst-row.selected { border-color: var(--accent); background: rgba(126, 224, 200, 0.08); }
+    .inst-row.hidden .inst-name { text-decoration: line-through; color: var(--muted); }
+    .inst-swatch { width: 12px; height: 12px; border-radius: 3px; border: 1px solid rgba(0, 0, 0, 0.4); }
+    .inst-id { color: var(--muted); font-variant-numeric: tabular-nums; }
+    .inst-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .inst-count { color: var(--muted); font-size: 11px; white-space: nowrap; }
+    .inst-btns { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px; }
+    .inst-btns button { padding: 3px 7px; font-size: 11px; }
+    .inst-btns button.active { border-color: var(--accent); color: var(--accent); }
   </style>
 </head>
 <body>
@@ -230,6 +257,16 @@
       </select>
       <span></span>
     </label>
+    <section id="inst-panel">
+      <h2>Instancias</h2>
+      <p class="inst-hint">Clic en el lienzo selecciona la instancia bajo el cursor · Esc quita la selección</p>
+      <div class="btns">
+        <button id="syn-two-spheres" type="button">Escena sintética (2 esferas)</button>
+        <button id="inst-show-all" type="button">Mostrar todo</button>
+      </div>
+      <div id="inst-status">Seleccionada: ninguna</div>
+      <div id="inst-list"><div class="inst-empty">Sin instancias. Carga la escena sintética o un fichero con etiquetas.</div></div>
+    </section>
     <div class="btns">
       <button id="sem-analyze" type="button">Tag scene (Grok)</button>
     </div>

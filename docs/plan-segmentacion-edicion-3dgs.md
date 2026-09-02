@@ -301,6 +301,8 @@ un esquema (`shared/schemas/instancias.schema.json`).
 
 ## 4. Plan por fases
 
+> **Estado (2 sep 2026):** F0 y F1 implementados en la rama `claude/gaussian-splat-plan-f0saqs`: GaussForge vendorizado, PLY 2DGS, `artifacts/`, `npm test` (38 pruebas) y `npm run test:e2e` (8 pruebas, Chromium + SwiftShader, render *offscreen*), búfer de etiquetas + tabla de instancias + modos ID/profundidad/normal + `renderOffscreen()`/`pick()` en `gpu-renderer.js`, panel **Instancias** en el HUD y escena sintética de dos esferas con profundidad verificada al 0,0 %. Ver `docs/testing.md`.
+
 | Fase | Entregable | Criterio de aceptación | Esfuerzo |
 | --- | --- | --- | --- |
 | **F0 Base** | GaussForge vendorizado; PLY 2DGS; `artifacts/`; pruebas Node para `splat-io`; Playwright con Chromium WebGPU para `selftest` | Carga sin red; `npm test` verde | 1 semana |
@@ -332,7 +334,7 @@ shared/                      splat-io, graph, lift, segments-io, schemas/
 semantic_sidecar/            server.py (+ segment.py, name.py, mesh.py, embed.py)
 scripts/                     herramientas de un solo uso (lote COLMAP → splat-distiller, conversión de datasets)
 artifacts/                   salidas generadas (gitignored salvo README)
-vendor/                      @gaussforge/wasm, onnxruntime-web, modelos ONNX (gitignored + script de descarga)
+vendor/                      @gaussforge/wasm versionado en git (1,4 MB, un solo archivo; F0 exige carga sin red) + scripts/vendor-gaussforge.sh; modelos ONNX grandes gitignored con script de descarga
 docs/                        este plan, pipeline, reporte
 ```
 

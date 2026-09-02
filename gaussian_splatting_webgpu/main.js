@@ -1,4 +1,6 @@
 import { WebGPUSplatRenderer } from "./gpu-renderer.js";
+import { labelColor } from "../shared/instances.js";
+import { makeTwoSpheres } from "../shared/synthetic.js";
 
 const DEMO_PLY = "./demo.ply";
 const DEFAULT_SCENE = "../splats/model.splat";
@@ -6,6 +8,12 @@ const SIDECAR_URL = "http://127.0.0.1:8766";
 const SAMPLE_SPLAT =
   "https://huggingface.co/cakewalk/splat-data/resolve/main/train.splat";
 const LOCAL_SPLAT = "../splat_converter/test.splat";
+
+/** A pointerup this close (CSS px) and this soon after pointerdown is a click, not a drag. */
+const CLICK_MAX_PX = 4;
+const CLICK_MAX_MS = 300;
+/** Tint strength applied by "Teñir" (0 = off). */
+const TINT_STRENGTH = 0.6;
 
 const $ = (id) => document.getElementById(id);
 
@@ -61,6 +69,20 @@ function lookAt(eye, target, up) {
   out[14] = -(z0 * eye[0] + z1 * eye[1] + z2 * eye[2]);
   out[15] = 1;
   return out;
+}
+
+/** Column-major 4x4 times a [x, y, z, w] vector. */
+function transformVec4(m, v) {
+  const out = [0, 0, 0, 0];
+  for (let r = 0; r < 4; r++) {
+    out[r] = m[r] * v[0] + m[4 + r] * v[1] + m[8 + r] * v[2] + m[12 + r] * v[3];
+  }
+  return out;
+}
+
+/** Canvas device pixels per CSS pixel (same clamp as resize()). */
+function devicePixelScale() {
+  return Math.min(window.devicePixelRatio || 1, 2);
 }
 
 class OrbitCamera {
@@ -122,21 +144,43 @@ class OrbitCamera {
   }
 }
 
-function bindOrbit(canvas, camera) {
+/** True when the pointerup `e` completes a left-button click started at `down`. */
+function isClick(down, e) {
+  if (!down || down.button !== 0 || e.button !== 0) return false;
+  const moved = Math.hypot(e.clientX - down.x, e.clientY - down.y);
+  return moved <= CLICK_MAX_PX && performance.now() - down.t <= CLICK_MAX_MS;
+}
+
+/**
+ * Orbit / pan / zoom on `canvas`. `onClick(cssX, cssY)` fires for a left-button
+ * pointerup within CLICK_MAX_PX / CLICK_MAX_MS of its pointerdown (canvas-relative CSS px).
+ */
+function bindOrbit(canvas, camera, onClick) {
   let dragging = false;
   let button = 0;
   let lastX = 0;
   let lastY = 0;
+  let down = null;
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());
   canvas.addEventListener("pointerdown", (e) => {
     dragging = true;
     button = e.button;
     lastX = e.clientX;
     lastY = e.clientY;
+    down = { x: e.clientX, y: e.clientY, t: performance.now(), button: e.button };
     canvas.setPointerCapture(e.pointerId);
   });
-  canvas.addEventListener("pointerup", () => {
+  canvas.addEventListener("pointerup", (e) => {
     dragging = false;
+    if (onClick && isClick(down, e)) {
+      const rect = canvas.getBoundingClientRect();
+      onClick(e.clientX - rect.left, e.clientY - rect.top);
+    }
+    down = null;
+  });
+  canvas.addEventListener("pointercancel", () => {
+    dragging = false;
+    down = null;
   });
   canvas.addEventListener("pointermove", (e) => {
     if (!dragging) return;
@@ -215,20 +259,224 @@ const ui = {
   },
 };
 
+const formatCount = (n) => n.toLocaleString("es-ES");
+const cssColor = (rgb) => `rgb(${rgb.map((v) => Math.round(v * 255)).join(", ")})`;
+
+/**
+ * HUD "Instancias": registry of named instances (label → name/count), the
+ * current selection, and the per-instance hide / isolate / tint controls.
+ * The renderer's instance table is the single source of truth for flags.
+ */
+class InstancePanel {
+  constructor(renderer, elements) {
+    this.renderer = renderer;
+    this.listEl = elements.list;
+    this.statusEl = elements.status;
+    /** @type {Map<number, {name: string, count: number}>} */
+    this.entries = new Map();
+    /** @type {{label: number, name: string, index: number} | null} */
+    this.selection = null;
+    this.isolateLabel = 0;
+    this.listEl.addEventListener("click", (e) => this._onListClick(e));
+  }
+
+  /** Forget every instance and clear GPU-side flags (new cloud loaded). */
+  reset() {
+    this.entries.clear();
+    this.selection = null;
+    this.isolateLabel = 0;
+    this.renderer.resetInstances();
+    this.renderer.setParams({ isolateLabel: 0 });
+    this.setStatus("Seleccionada: ninguna");
+    this.renderList();
+  }
+
+  register(label, name, count) {
+    if (!Number.isInteger(label) || label <= 0) throw new Error(`etiqueta inválida ${label}`);
+    this.entries.set(label, { name: name || `instancia ${label}`, count: count | 0 });
+  }
+
+  /** Register every non-zero label present in `labels` with counts (names: label → nombre). */
+  fromLabels(labels, names = {}) {
+    const counts = new Map();
+    for (let i = 0; i < labels.length; i++) {
+      const l = labels[i];
+      if (l) counts.set(l, (counts.get(l) || 0) + 1);
+    }
+    for (const label of [...counts.keys()].sort((a, b) => a - b)) {
+      this.register(label, names[label], counts.get(label));
+    }
+    this.renderList();
+  }
+
+  nameOf(label) {
+    const e = this.entries.get(label);
+    return e ? e.name : `instancia ${label}`;
+  }
+
+  setStatus(text) {
+    this.statusEl.textContent = text;
+  }
+
+  /** Apply a renderer.pick() result: select the instance under the pixel. */
+  selectHit(hit) {
+    if (!hit || hit.index < 0) {
+      this.clear();
+      return;
+    }
+    if (hit.label === 0) {
+      this.clear();
+      this.setStatus(`Seleccionada: ninguna · fondo · gaussiana ${hit.index}`);
+      return;
+    }
+    if (!this.entries.has(hit.label)) {
+      // Label from a file without a registry entry: count it on demand.
+      const labels = this.renderer.getLabels();
+      let n = 0;
+      for (let i = 0; i < labels.length; i++) if (labels[i] === hit.label) n++;
+      this.register(hit.label, null, n);
+    }
+    this.select(hit.label, hit.index);
+  }
+
+  /** Select instance `label` (0/null clears); `index` is the picked gaussian, -1 if unknown. */
+  select(label, index = -1) {
+    if (!label) {
+      this.clear();
+      return;
+    }
+    if (this.selection && this.selection.label !== label) {
+      this.renderer.setInstance(this.selection.label, { selected: false });
+    }
+    this.renderer.setInstance(label, { selected: true });
+    this.selection = { label, name: this.nameOf(label), index };
+    const gauss = index >= 0 ? String(index) : "—";
+    this.setStatus(`Seleccionada: instancia ${label} (${this.selection.name}) · gaussiana ${gauss}`);
+    console.log(`[instancias] seleccionada instancia ${label} (${this.selection.name}) gaussiana ${gauss}`);
+    this.renderList();
+  }
+
+  clear() {
+    if (this.selection) this.renderer.setInstance(this.selection.label, { selected: false });
+    this.selection = null;
+    this.setStatus("Seleccionada: ninguna");
+    this.renderList();
+  }
+
+  isolate(label) {
+    this.isolateLabel = this.isolateLabel === label ? 0 : label;
+    this.renderer.setParams({ isolateLabel: this.isolateLabel });
+    this.renderList();
+  }
+
+  toggleHidden(label) {
+    const visible = this.renderer.getInstance(label).visible;
+    this.renderer.setInstance(label, { visible: !visible });
+    this.renderList();
+  }
+
+  toggleTint(label) {
+    const strength = this.renderer.getInstance(label).tint[3];
+    const rgb = labelColor(label);
+    this.renderer.setInstance(label, { tint: [...rgb, strength > 0 ? 0 : TINT_STRENGTH] });
+    this.renderList();
+  }
+
+  showAll() {
+    this.isolateLabel = 0;
+    this.renderer.setParams({ isolateLabel: 0 });
+    this.renderer.setInstance(0, { visible: true });
+    for (const label of this.entries.keys()) this.renderer.setInstance(label, { visible: true });
+    this.renderList();
+  }
+
+  /** Plain snapshot of the registry (for tests and the list). */
+  rows() {
+    return [...this.entries.entries()].map(([label, e]) => {
+      const inst = this.renderer.getInstance(label);
+      return {
+        label,
+        name: e.name,
+        count: e.count,
+        visible: inst.visible,
+        selected: inst.selected,
+        tinted: inst.tint[3] > 0,
+        isolated: this.isolateLabel === label,
+        color: labelColor(label),
+      };
+    });
+  }
+
+  renderList() {
+    this.listEl.innerHTML = "";
+    const rows = this.rows();
+    if (!rows.length) {
+      const empty = document.createElement("div");
+      empty.className = "inst-empty";
+      empty.textContent = "Sin instancias. Carga la escena sintética o un fichero con etiquetas.";
+      this.listEl.appendChild(empty);
+      return;
+    }
+    for (const row of rows) this.listEl.appendChild(this._rowElement(row));
+  }
+
+  _rowElement(row) {
+    const el = document.createElement("div");
+    el.className = "inst-row";
+    el.dataset.label = String(row.label);
+    if (row.selected) el.classList.add("selected");
+    if (!row.visible) el.classList.add("hidden");
+    const button = (act, text, active) =>
+      `<button type="button" data-act="${act}"${active ? ' class="active"' : ""}>${text}</button>`;
+    el.innerHTML =
+      `<span class="inst-swatch" style="background:${cssColor(row.color)}"></span>` +
+      `<span class="inst-id">#${row.label}</span>` +
+      `<span class="inst-name"></span>` +
+      `<span class="inst-count">${formatCount(row.count)} gaussianas</span>` +
+      `<div class="inst-btns">` +
+      button("isolate", "Aislar", row.isolated) +
+      button("hide", row.visible ? "Ocultar" : "Mostrar", !row.visible) +
+      button("tint", "Teñir", row.tinted) +
+      `</div>`;
+    el.querySelector(".inst-name").textContent = row.name;
+    return el;
+  }
+
+  _onListClick(e) {
+    const rowEl = e.target.closest(".inst-row");
+    if (!rowEl) return;
+    const label = Number(rowEl.dataset.label);
+    const act = e.target.closest("button[data-act]");
+    if (!act) {
+      this.select(label);
+      return;
+    }
+    if (act.dataset.act === "isolate") this.isolate(label);
+    else if (act.dataset.act === "hide") this.toggleHidden(label);
+    else if (act.dataset.act === "tint") this.toggleTint(label);
+  }
+}
+
 async function main() {
   const canvas = $("gpu-canvas");
   const overlayUnsupported = $("unsupported");
+  const query = new URLSearchParams(location.search);
+  // ?offscreen=1: never configure the canvas context (headless SwiftShader tests);
+  // pick()/renderOffscreen() still work, render() is a no-op.
+  const offscreenOnly = query.get("offscreen") === "1";
   const renderer = new WebGPUSplatRenderer(canvas);
   try {
-    await renderer.init();
+    await renderer.init({ offscreenOnly });
   } catch (err) {
     overlayUnsupported.classList.remove("hidden");
     $("unsupported-msg").textContent = err.message || String(err);
     return;
   }
+  if (offscreenOnly) console.info("[viewer] modo offscreen=1: el canvas no se configura; sólo pick/renderOffscreen");
 
   const camera = new OrbitCamera();
-  bindOrbit(canvas, camera);
+  const panel = new InstancePanel(renderer, { list: $("inst-list"), status: $("inst-status") });
+  bindOrbit(canvas, camera, (x, y) => pickAt(x, y));
   const worker = new Worker(new URL("./parse-worker.js", import.meta.url), {
     type: "module",
   });
@@ -240,6 +488,8 @@ async function main() {
   let fps = 0;
   let freezeFrame = false;
   let lastSemantic = null;
+  /** Matrices used by the last presented frame (for projecting points to pixels). */
+  let lastFrame = null;
 
   const paramsFromUi = () => ({
     pointMode: $("point-mode").checked ? 1 : 0,
@@ -253,21 +503,59 @@ async function main() {
     colorMode: Number($("color-mode").value),
     pixelDiscard: Number($("pixel-discard").value),
     antialias: Number($("antialias").value),
+    isolateLabel: panel.isolateLabel,
   });
 
   function resize() {
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const dpr = devicePixelScale();
     const w = Math.max(1, Math.floor(canvas.clientWidth * dpr));
     const h = Math.max(1, Math.floor(canvas.clientHeight * dpr));
     if (canvas.width !== w || canvas.height !== h) {
       canvas.width = w;
       canvas.height = h;
-      renderer.context.configure({
-        device: renderer.device,
-        format: renderer.format,
-        alphaMode: "premultiplied",
-        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
-      });
+      if (renderer.context) {
+        renderer.context.configure({
+          device: renderer.device,
+          format: renderer.format,
+          alphaMode: "premultiplied",
+          usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+        });
+      }
+    }
+  }
+
+  function updateCamera() {
+    const aspect = canvas.width / canvas.height;
+    const proj = perspective(camera.fov, aspect, camera.near, camera.far);
+    const view = lookAt(camera.eye(), camera.target, camera.up());
+    const fy = canvas.height / (2 * Math.tan(camera.fov / 2));
+    renderer.setCamera(proj, view, [fy, fy], [canvas.width, canvas.height], camera.eye());
+    lastFrame = { proj, view, width: canvas.width, height: canvas.height };
+  }
+
+  /** World point → canvas CSS pixel [x, y] with the last frame's camera (null if behind/unknown). */
+  function projectToCss(p) {
+    if (!lastFrame) return null;
+    const c = transformVec4(lastFrame.proj, transformVec4(lastFrame.view, [p[0], p[1], p[2], 1]));
+    if (c[3] <= 0) return null;
+    const dpr = devicePixelScale();
+    const px = (c[0] / c[3] * 0.5 + 0.5) * lastFrame.width;
+    const py = (1 - (c[1] / c[3] * 0.5 + 0.5)) * lastFrame.height;
+    return [px / dpr, py / dpr];
+  }
+
+  /** Click on the canvas (CSS px): pick the gaussian and select its instance. */
+  async function pickAt(cssX, cssY) {
+    if (!renderer.count) return null;
+    const dpr = devicePixelScale();
+    try {
+      const hit = await renderer.pick(cssX * dpr, cssY * dpr);
+      panel.selectHit(hit);
+      return hit;
+    } catch (err) {
+      ui.setStatus(`Selección fallida: ${err.message}`, "err");
+      console.error("[instancias] pick falló", err);
+      return null;
     }
   }
 
@@ -306,6 +594,7 @@ async function main() {
     const compression = Number($("compression").value);
     const result = await parseBuffer(buffer, name, compression);
     renderer.setCloud(result.gaussians, result.sh, result.shDegree || 0);
+    panel.reset();
     camera.fit(result.bounds);
     const decoder = result.decoder === "gaussforge" ? "GaussForge" : "built-in";
     const degree = result.shDegree || 0;
@@ -345,6 +634,35 @@ async function main() {
       count: result.count,
       compact,
     };
+  }
+
+  /** Build the two-sphere scene on the CPU and register its instances (labels 1 and 2). */
+  function loadSynthetic(options = {}) {
+    ui.setStatus("Generando escena sintética…");
+    const scene = makeTwoSpheres(options);
+    renderer.setCloud(scene.gaussians, scene.sh, scene.shDegree);
+    panel.reset();
+    renderer.setLabels(scene.labels);
+    panel.fromLabels(scene.labels, scene.names);
+    camera.fit(scene.bounds);
+    ui.setMeta(`Escena sintética · 2 esferas · SH0 · ${formatCount(scene.count)} gaussianas`);
+    ui.setNote(
+      "Escena sintética de dos esferas (etiquetas 1 y 2) para probar la selección de instancias: clic en una esfera la selecciona.",
+      "ok"
+    );
+    ui.setStatus("Lista (escena sintética)", "ok");
+    ui.setProgress(1);
+    ui.showOverlay(false);
+    console.log(`[instancias] escena sintética: ${scene.count} gaussianas, instancias ${JSON.stringify(scene.names)}`);
+    window.__gsViewer = {
+      name: "synthetic-two-spheres",
+      format: "synthetic",
+      decoder: "synthetic",
+      shDegree: 0,
+      count: scene.count,
+      compact: false,
+    };
+    return scene;
   }
 
   async function exportFormat(outFormat) {
@@ -424,6 +742,38 @@ async function main() {
     if (fmt) exportFormat(fmt);
   });
 
+  $("syn-two-spheres").addEventListener("click", () => {
+    try {
+      loadSynthetic();
+    } catch (err) {
+      ui.setStatus(`Escena sintética fallida: ${err.message}`, "err");
+    }
+  });
+  $("inst-show-all").addEventListener("click", () => panel.showAll());
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") panel.clear();
+  });
+
+  window.__gsInstances = {
+    select: (label, index = -1) => panel.select(label, index),
+    clear: () => panel.clear(),
+    labels: () => renderer.getLabels(),
+    get current() {
+      return panel.selection ? { ...panel.selection } : null;
+    },
+    get isolateLabel() {
+      return panel.isolateLabel;
+    },
+    list: () => panel.rows(),
+    isolate: (label) => panel.isolate(label),
+    toggleHidden: (label) => panel.toggleHidden(label),
+    toggleTint: (label) => panel.toggleTint(label),
+    showAll: () => panel.showAll(),
+    loadSynthetic: (options) => loadSynthetic(options),
+    pickAt: (cssX, cssY) => pickAt(cssX, cssY),
+    project: (p) => projectToCss(p),
+  };
+
   async function blobToB64(blob) {
     const buf = await blob.arrayBuffer();
     const bytes = new Uint8Array(buf);
@@ -501,11 +851,7 @@ async function main() {
         camera.dampPanY = 0;
         camera.dampZoom = 0;
         resize();
-        const aspect = canvas.width / canvas.height;
-        const proj = perspective(camera.fov, aspect, camera.near, camera.far);
-        const viewM = lookAt(camera.eye(), camera.target, camera.up());
-        const fy = canvas.height / (2 * Math.tan(camera.fov / 2));
-        renderer.setCamera(proj, viewM, [fy, fy], [canvas.width, canvas.height], camera.eye());
+        updateCamera();
         renderer.setParams(paramsFromUi());
         renderer.render();
         const blob = await renderer.snapshotPng(1024);
@@ -600,11 +946,7 @@ async function main() {
     if (!freezeFrame) {
       resize();
       camera.step();
-      const aspect = canvas.width / canvas.height;
-      const proj = perspective(camera.fov, aspect, camera.near, camera.far);
-      const view = lookAt(camera.eye(), camera.target, camera.up());
-      const fy = canvas.height / (2 * Math.tan(camera.fov / 2));
-      renderer.setCamera(proj, view, [fy, fy], [canvas.width, canvas.height], camera.eye());
+      updateCamera();
       renderer.setParams(paramsFromUi());
       renderer.render();
     }
@@ -616,10 +958,18 @@ async function main() {
   }
   requestAnimationFrame(frame);
 
-  const params = new URLSearchParams(location.search);
+  // ?scene=synthetic loads the two-sphere scene instead of a file.
+  if (query.get("scene") === "synthetic") {
+    try {
+      loadSynthetic();
+    } catch (err) {
+      ui.setStatus(`Escena sintética fallida: ${err.message}`, "err");
+    }
+    return;
+  }
   const start =
-    params.get("url") ||
-    params.get("file") ||
+    query.get("url") ||
+    query.get("file") ||
     DEFAULT_SCENE;
   const startName = start.split("/").pop() || "scene";
   try {
