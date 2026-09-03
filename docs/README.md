@@ -2,8 +2,8 @@
 
 | File | What it is |
 | --- | --- |
-| [open-vocab-3dgs-imagine-pipeline-paper.md](open-vocab-3dgs-imagine-pipeline-paper.md) | Technical report: pipeline, flowchart, references, third-party attributions |
-| [open-vocab-3dgs-imagine-pipeline-paper.pdf](open-vocab-3dgs-imagine-pipeline-paper.pdf) | Same report as PDF (regenerate: `npm install --no-save marked && node scripts/render-report-pdf.mjs docs/open-vocab-3dgs-imagine-pipeline-paper.md docs/open-vocab-3dgs-imagine-pipeline-paper.pdf`) |
+| [open-vocab-3dgs-imagine-pipeline-paper.md](open-vocab-3dgs-imagine-pipeline-paper.md) | Technical report: SAM 2.1 browser segmentation, editing, splat-to-mesh/GLB mathematics, fabrication handoff, figures, references and attributions |
+| [open-vocab-3dgs-imagine-pipeline-paper.pdf](open-vocab-3dgs-imagine-pipeline-paper.pdf) | Same report as PDF (regenerate after `npm ci`: `node scripts/render-report-pdf.mjs docs/open-vocab-3dgs-imagine-pipeline-paper.md docs/open-vocab-3dgs-imagine-pipeline-paper.pdf`; equations render with KaTeX) |
 | [plan-segmentacion-edicion-3dgs.md](plan-segmentacion-edicion-3dgs.md) | Plan: clustering, segmentación, clasificación, malla y edición de objetos sobre 3DGS (sin entrenamiento por escena) |
 | [../setup.sh](../setup.sh) | One-shot machine setup (dirs, `.env`, dependency checks) |
 | [../models/README.md](../models/README.md) | Optional ONNX (SAM 2 / CLIP); `main` also uses `scripts/download-ml-models.sh` → `vendor/ml/` |
