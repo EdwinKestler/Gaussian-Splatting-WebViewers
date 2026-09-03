@@ -268,6 +268,89 @@ export class TsdfVolume {
     mesh.triangleCount = mesh.indices.length / 3;
     return fixWinding(mesh);
   }
+
+  /**
+   * Marching tetrahedra over the same TSDF. The fixed six-tetrahedra cube
+   * decomposition shares the same face diagonals between neighbouring cells,
+   * avoiding ambiguous surface-net junctions in meshes intended for printing.
+   */
+  extractMarchingTetrahedra({ minWeight = 0.5 } = {}) {
+    const n = this.n;
+    const { tsdf, weight, color, colorWeight } = this;
+    const positions = [], normals = [], colors = [], indices = [];
+    const edgeVertices = new Map();
+    const tetrahedra = [
+      [0, 5, 1, 7], [0, 1, 3, 7], [0, 3, 2, 7],
+      [0, 2, 6, 7], [0, 6, 4, 7], [0, 4, 5, 7],
+    ];
+    const gradient = (i, j, k) => {
+      const im = Math.max(0, i - 1), ip = Math.min(n - 1, i + 1);
+      const jm = Math.max(0, j - 1), jp = Math.min(n - 1, j + 1);
+      const km = Math.max(0, k - 1), kp = Math.min(n - 1, k + 1);
+      return [
+        tsdf[this.index(ip, j, k)] - tsdf[this.index(im, j, k)],
+        tsdf[this.index(i, jp, k)] - tsdf[this.index(i, jm, k)],
+        tsdf[this.index(i, j, kp)] - tsdf[this.index(i, j, km)],
+      ];
+    };
+    for (let k = 0; k < n - 1; k++) {
+      for (let j = 0; j < n - 1; j++) {
+        for (let i = 0; i < n - 1; i++) {
+          const corners = Array.from({ length: 8 }, (_, c) => {
+            const x = i + (c & 1), y = j + ((c >> 1) & 1), z = k + ((c >> 2) & 1);
+            const id = this.index(x, y, z);
+            return { x, y, z, id, value: tsdf[id] };
+          });
+          if (corners.some((c) => weight[c.id] < minWeight)) continue;
+          const crossing = (ca, cb) => {
+            const a = corners[ca], b = corners[cb];
+            const lo = Math.min(a.id, b.id), hi = Math.max(a.id, b.id);
+            const key = `${lo}:${hi}`;
+            if (edgeVertices.has(key)) return edgeVertices.get(key);
+            const t = a.value / (a.value - b.value);
+            const gx = a.x + (b.x - a.x) * t, gy = a.y + (b.y - a.y) * t, gz = a.z + (b.z - a.z) * t;
+            const vertex = positions.length / 3;
+            positions.push(this.origin[0] + gx * this.voxel, this.origin[1] + gy * this.voxel, this.origin[2] + gz * this.voxel);
+            const ga = gradient(a.x, a.y, a.z), gb = gradient(b.x, b.y, b.z);
+            const nx = ga[0] + (gb[0] - ga[0]) * t, ny = ga[1] + (gb[1] - ga[1]) * t, nz = ga[2] + (gb[2] - ga[2]) * t;
+            const nl = Math.hypot(nx, ny, nz) || 1;
+            normals.push(nx / nl, ny / nl, nz / nl);
+            const aw = colorWeight[a.id], bw = colorWeight[b.id];
+            const cw = aw * (1 - t) + bw * t;
+            for (let axis = 0; axis < 3; axis++) {
+              const value = cw > 0 ? (color[a.id * 3 + axis] * aw * (1 - t) + color[b.id * 3 + axis] * bw * t) / cw / 255 : 0.7;
+              colors.push(value);
+            }
+            edgeVertices.set(key, vertex);
+            return vertex;
+          };
+          for (const tet of tetrahedra) {
+            const inside = tet.filter((c) => corners[c].value < 0);
+            if (!inside.length || inside.length === 4) continue;
+            const outside = tet.filter((c) => corners[c].value >= 0);
+            if (inside.length === 1) {
+              indices.push(crossing(inside[0], outside[0]), crossing(inside[0], outside[1]), crossing(inside[0], outside[2]));
+            } else if (inside.length === 3) {
+              indices.push(crossing(outside[0], inside[0]), crossing(outside[0], inside[1]), crossing(outside[0], inside[2]));
+            } else {
+              const a = crossing(inside[0], outside[0]), b = crossing(inside[0], outside[1]);
+              const c = crossing(inside[1], outside[0]), d = crossing(inside[1], outside[1]);
+              indices.push(a, b, d, a, d, c);
+            }
+          }
+        }
+      }
+    }
+    const mesh = {
+      positions: Float32Array.from(positions),
+      normals: Float32Array.from(normals),
+      colors: Float32Array.from(colors),
+      indices: Uint32Array.from(indices),
+    };
+    mesh.vertexCount = mesh.positions.length / 3;
+    mesh.triangleCount = mesh.indices.length / 3;
+    return fixWinding(mesh);
+  }
 }
 
 const CUBE_EDGES = [

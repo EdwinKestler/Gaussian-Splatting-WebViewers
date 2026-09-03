@@ -105,6 +105,19 @@ describe("TSDF sphere", () => {
       assert.ok(Math.abs(mesh.colors[i * 3] - 1) < 0.02 && Math.abs(mesh.colors[i * 3 + 1] - 128 / 255) < 0.02 && mesh.colors[i * 3 + 2] < 0.02);
     }
   });
+
+  test("marching tetrahedra plus conservative repair produces a printable manifold", async () => {
+    const { vol } = build({ resolution: 32, views: 10 });
+    const raw = vol.extractMarchingTetrahedra();
+    const { repairMesh } = await import("../../shared/mesh-ops.js");
+    const repaired = repairMesh(largestComponent(raw));
+    assert.ok(repaired.mesh.vertexCount > 1000);
+    assert.equal(repaired.after.boundaryEdges, 0);
+    assert.equal(repaired.after.nonManifoldEdges, 0);
+    assert.equal(repaired.after.inconsistentWindingEdges, 0);
+    assert.equal(repaired.after.printable, true);
+    assert.ok(repaired.after.signedVolume > 0);
+  });
 });
 
 describe("GLB", () => {

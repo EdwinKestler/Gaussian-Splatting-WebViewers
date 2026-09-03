@@ -1,6 +1,6 @@
 /**
  * F6 acceptance (plan §4 "F6 Malla", milestone H4): "Malla" on an instance
- * produces a GLB. Sphere A of the synthetic scene is orbited (depth + colour),
+ * produces a GLB or print-scaled 3MF. Sphere A of the synthetic scene is orbited (depth + colour),
  * fused into a TSDF in the worker and extracted with surface nets; the mesh is
  * a closed surface whose mean radius matches the sphere within the documented
  * margin, the GLB is a valid glTF 2.0 container, the sidecar (mocked) receives
@@ -23,7 +23,7 @@ test.beforeEach(async ({ page }) => {
   page.on("pageerror", (err) => console.log(`[browser:pageerror] ${err.message}`));
 });
 
-test("Malla: sphere A → closed GLB with the right radius, saved through /mallas and referenced by instancias.json", async ({ page }) => {
+test("Malla: sphere A → GLB with the right radius, saved through /mallas and referenced by instancias.json", async ({ page }) => {
   const calls = [];
   await page.route(`${SIDECAR}/**`, async (route) => {
     const req = route.request();
@@ -78,6 +78,68 @@ test("Malla: sphere A → closed GLB with the right radius, saved through /malla
   expect(calls[0].magic).toBe("glTF");
   expect(calls[0].id_instancia).toBe(1);
   expect(calls[0].metadatos.malla.vertices).toBe(r.stats.vertices);
+});
+
+test("Malla: print path repairs topology and writes a millimetre-scale 3MF package", async ({ page }) => {
+  const calls = [];
+  await page.route(`${SIDECAR}/**`, async (route) => {
+    const req = route.request();
+    if (req.method() === "OPTIONS") return route.fulfill({ status: 204, headers: CORS });
+    const body = req.postDataJSON();
+    const file = Buffer.from(body.archivo_b64, "base64");
+    calls.push({ formato: body.formato, magic: file.subarray(0, 4).toString("hex"), bytes: file.length, metadata: body.metadatos });
+    return route.fulfill({ status: 200, headers: { ...CORS, "Content-Type": "application/json" }, body: JSON.stringify({ ok: true, carpeta: `artifacts/mallas/${body.escena}`, malla: `artifacts/mallas/${body.escena}/${body.id_instancia}.3mf`, bytes: file.length, metadatos: null }) });
+  });
+  await page.goto(VIEWER_PAGE);
+  await page.waitForFunction(() => window.__gsViewer?.name === "synthetic-two-spheres" && !!window.__gsMesh, null, { timeout: 60_000 });
+  const r = await page.evaluate(async () => {
+    const result = await window.__gsMesh.build(1, { views: 8, resolution: 32, edge: 128, format: "3mf", maxDimensionMm: 80, download: false, save: true, returnMesh: true });
+    const { read3mfFiles } = await import("/shared/three-mf.js");
+    const files = read3mfFiles(result.threeMf);
+    const model = new TextDecoder().decode(files.get("3D/3dmodel.model"));
+    const p = result.mesh.positions;
+    const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
+    for (let i = 0; i < p.length; i += 3) for (let a = 0; a < 3; a++) { min[a] = Math.min(min[a], p[i + a]); max[a] = Math.max(max[a], p[i + a]); }
+    return {
+      name: result.name,
+      format: result.format,
+      bytes: result.bytes,
+      files: [...files.keys()],
+      unitMm: /<model unit="millimeter"/.test(model),
+      vertexElements: (model.match(/<vertex /g) || []).length,
+      triangleElements: (model.match(/<triangle /g) || []).length,
+      min,
+      max,
+      validation: result.stats.validation,
+      repair: result.stats.repair,
+      metodo: result.metadatos.metodo,
+      impresion: result.metadatos.impresion,
+      saved: result.saved,
+      status: document.getElementById("mesh-status").textContent,
+    };
+  });
+  console.log(`[f6-3mf] ${JSON.stringify({ ...r, impresion: { ...r.impresion, validacion: undefined } })}`);
+  expect(r.name).toBe("synthetic-two-spheres_instancia-1.3mf");
+  expect(r.format).toBe("3mf");
+  expect(r.files).toEqual(["[Content_Types].xml", "_rels/.rels", "3D/3dmodel.model"]);
+  expect(r.unitMm).toBe(true);
+  expect(r.vertexElements).toBe(r.validation.vertices);
+  expect(r.triangleElements).toBe(r.validation.triangles);
+  expect(r.validation.printable).toBe(true);
+  expect(r.validation.boundaryEdges).toBe(0);
+  expect(r.validation.nonManifoldEdges).toBe(0);
+  expect(r.metodo.extraccion).toBe("marching-tetrahedra");
+  expect(r.metodo.reparacion).toBe(true);
+  expect(r.impresion.unidad).toBe("millimeter");
+  expect(r.impresion.dimension_maxima_mm).toBe(80);
+  expect(Math.max(...r.max.map((v, a) => v - r.min[a]))).toBeCloseTo(80, 3);
+  expect(r.min[2]).toBeCloseTo(0, 5);
+  expect(r.saved.malla).toBe("artifacts/mallas/synthetic-two-spheres/1.3mf");
+  expect(r.status).toMatch(/^synthetic-two-spheres_instancia-1\.3mf: .* · cerrada ·/);
+  expect(calls).toHaveLength(1);
+  expect(calls[0].formato).toBe("3mf");
+  expect(calls[0].magic).toBe("504b0304");
+  expect(calls[0].metadata.impresion.unidad).toBe("millimeter");
 });
 
 test("Malla: mesh colour follows the instance colour and the median-depth path also works", async ({ page }) => {

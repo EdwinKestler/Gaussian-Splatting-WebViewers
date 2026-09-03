@@ -8,6 +8,8 @@ import { EditLog, bakeSession, composeTransform, mat4Multiply, mat4Translation, 
 import { encodePly, encodeSplat32, exportFileName } from "../shared/export-io.js";
 import { orbitCameras } from "../shared/tsdf.js";
 import { encodeGlb } from "../shared/glb.js";
+import { repairMesh, scaleMeshToMillimeters } from "../shared/mesh-ops.js";
+import { encode3mf } from "../shared/three-mf.js";
 
 const DEMO_PLY = "./demo.ply";
 const DEFAULT_SCENE = "../splats/alarm_clock_generated.splat";
@@ -1854,7 +1856,11 @@ async function main() {
 
   // ---------------------------------------------------------- Malla (F6)
 
-  const meshEl = { views: $("mesh-views"), resolution: $("mesh-resolution"), edge: $("mesh-edge"), depth: $("mesh-depth"), carve: $("mesh-carve"), build: $("mesh-build"), status: $("mesh-status") };
+  const meshEl = {
+    views: $("mesh-views"), resolution: $("mesh-resolution"), edge: $("mesh-edge"), depth: $("mesh-depth"),
+    format: $("mesh-format"), size: $("mesh-size"), carve: $("mesh-carve"), repair: $("mesh-repair"),
+    build: $("mesh-build"), status: $("mesh-status"),
+  };
   const meshState = { running: false, worker: null, jobId: 0, pending: null, last: null };
 
   function setMeshStatus(text, kind = "") {
@@ -1863,6 +1869,16 @@ async function main() {
     if (kind === "err") console.warn(`[malla] ${text}`);
     else console.info(`[malla] ${text}`);
   }
+
+  function syncMeshFormatControls() {
+    const printing = meshEl.format.value === "3mf";
+    meshEl.size.disabled = !printing || meshState.running;
+    meshEl.size.title = printing ? "Longitud máxima del archivo 3MF en milímetros" : "Sólo se aplica al formato 3MF";
+    meshEl.build.textContent = printing ? "Crear 3MF de la seleccionada" : "Crear GLB de la seleccionada";
+  }
+
+  meshEl.format.addEventListener("change", syncMeshFormatControls);
+  syncMeshFormatControls();
 
   function meshWorker() {
     if (!meshState.worker) {
@@ -1897,7 +1913,8 @@ async function main() {
 
   /**
    * Mesh one instance: isolate it, orbit `views` cameras around its bounds,
-   * fuse depth + colour into a TSDF in the worker and write a GLB.
+   * fuse depth + colour into a TSDF in the worker, validate/repair the mesh,
+   * and write a GLB or a millimetre-scale 3MF package.
    */
   async function meshInstance(label, options = {}) {
     if (!cloud || !cloud.count) throw new Error("carga una escena antes de crear mallas");
@@ -1909,11 +1926,16 @@ async function main() {
     const resolution = Math.max(16, Math.min(256, Number(options.resolution ?? meshEl.resolution.value) || 96));
     const edge = Math.max(64, Math.min(1024, Number(options.edge ?? meshEl.edge.value) || 256));
     const depthKind = options.depth || meshEl.depth.value;
+    const format = String(options.format ?? meshEl.format.value ?? "glb").toLowerCase();
+    if (!['glb', '3mf'].includes(format)) throw new Error(`formato de malla no admitido: ${format}`);
+    const maxDimensionMm = Math.max(1, Math.min(1000, Number(options.maxDimensionMm ?? meshEl.size.value) || 100));
     const carve = options.carve ?? meshEl.carve.checked;
+    const repair = options.repair ?? meshEl.repair.checked;
     const download = options.download ?? true;
     const save = options.save ?? true;
     meshState.running = true;
     meshEl.build.disabled = true;
+    syncMeshFormatControls();
     freezeFrame = true;
     const saved = { target: camera.target.slice(), radius: camera.radius, yaw: camera.yaw, pitch: camera.pitch, isolate: renderer.params.isolateLabel };
     const t0 = performance.now();
@@ -1952,7 +1974,7 @@ async function main() {
       const fused = await new Promise((resolve, reject) => {
         meshState.pending = { id, resolve, reject };
         meshWorker().postMessage(
-          { id, views: captured, center, radius, resolution, carve, alphaMin: 0.05 },
+          { id, views: captured, center, radius, resolution, carve, repair, fillHoles: repair, maxHoleEdges: 64, printMode: format === "3mf", alphaMin: 0.05 },
           captured.flatMap((c) => [c.depth.buffer, c.alpha.buffer, c.color.buffer])
         );
       });
@@ -1961,26 +1983,61 @@ async function main() {
       const escena = (window.__gsViewer && window.__gsViewer.name) || "escena";
       const e = panel.entries.get(label) || {};
       const metadatos = {
-        version: 1,
+        version: 2,
         escena,
         fecha: new Date().toISOString(),
         id_instancia: label,
         nombre_es: e.nombre_es || e.name || `instancia ${label}`,
-        metodo: { profundidad: depthKind, vistas: cams.length, arista: [W, H], voxeles: resolution, voxel: fused.stats.voxelSize, truncamiento: fused.stats.truncation, tallado: carve, extraccion: "surface-nets", componentes: fused.stats.components, triangulos_descartados: fused.stats.removedTriangles },
-        malla: { vertices: fused.stats.vertices, triangulos: fused.stats.triangles, bbox: fused.stats.bbox, euler: fused.stats.euler },
+        formato: format,
+        metodo: { profundidad: depthKind, vistas: cams.length, arista: [W, H], voxeles: resolution, voxel: fused.stats.voxelSize, truncamiento: fused.stats.truncation, tallado: carve, extraccion: format === "3mf" ? "marching-tetrahedra" : "surface-nets", componentes: fused.stats.components, triangulos_descartados: fused.stats.removedTriangles, reparacion: repair },
+        malla: {
+          vertices: fused.stats.vertices,
+          triangulos: fused.stats.triangles,
+          bbox: fused.stats.bbox,
+          euler: fused.stats.euler,
+          validacion: fused.stats.validation,
+          reparacion: fused.stats.repair,
+        },
         aviso: window.__gsViewer && window.__gsViewer.variant === "2dgs" ? null : "3DGS vainilla: superficie ruidosa; usa PLY de 2DGS/GOF para malla de producción",
         tiempos_ms: { render: Math.round(msRender), fusion: Math.round(fused.msFuse), extraccion: Math.round(fused.ms - fused.msFuse) },
       };
-      const glb = encodeGlb(mesh, { name: `${escena} instancia ${label}`, extras: { id_instancia: label, nombre_es: metadatos.nombre_es, escena } });
-      const name = `${exportFileName(escena, label, "glb")}`;
-      if (download) downloadBlob(new Blob([glb], { type: "model/gltf-binary" }), name);
+      let outputMesh = mesh;
+      let bytes;
+      let mime;
+      if (format === "3mf") {
+        const scaled = scaleMeshToMillimeters(mesh, { maxDimensionMm });
+        // Validate again in output units: scaling can expose triangles that
+        // are below the print-space area tolerance on dense real scenes.
+        const printRepair = repair
+          ? repairMesh(scaled.mesh, { fillHoles: true, maxHoleEdges: 64 })
+          : { mesh: scaled.mesh, after: scaled.validation, repair: null };
+        outputMesh = printRepair.mesh;
+        metadatos.impresion = {
+          unidad: scaled.unit,
+          dimension_maxima_mm: maxDimensionMm,
+          escala_unidades_escena_a_mm: scaled.scale,
+          bbox_mm: printRepair.after.bbox,
+          validacion: printRepair.after,
+          reparacion_post_escala: printRepair.repair,
+        };
+        bytes = encode3mf(outputMesh, { name: `${escena} instancia ${label}`, requireWatertight: true });
+        mime = "model/3mf";
+      } else {
+        bytes = encodeGlb(mesh, { name: `${escena} instancia ${label}`, extras: { id_instancia: label, nombre_es: metadatos.nombre_es, escena } });
+        mime = "model/gltf-binary";
+      }
+      const name = exportFileName(escena, label, format);
+      if (download) downloadBlob(new Blob([bytes], { type: mime }), name);
       let savedTo = null;
       if (save) {
         try {
+          const fileB64 = await blobToB64(new Blob([bytes]));
+          const payload = { escena, id_instancia: label, formato: format, archivo_b64: fileB64, metadatos };
+          if (format === "glb") payload.glb_b64 = fileB64; // compatible with sidecars before metadata v2
           const res = await fetch(`${SIDECAR_URL}/mallas`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ escena, id_instancia: label, glb_b64: await blobToB64(new Blob([glb])), metadatos }),
+            body: JSON.stringify(payload),
           });
           const data = await res.json();
           if (res.ok && data.ok) savedTo = data;
@@ -1991,14 +2048,24 @@ async function main() {
       }
       if (savedTo && e) e.malla = savedTo.malla;
       const ms = performance.now() - t0;
-      meshState.last = { label, name, stats: fused.stats, metadatos, saved: savedTo, ms, bytes: glb.byteLength };
+      const topology = fused.stats.validation;
+      const topologyText = topology.watertight
+        ? "cerrada"
+        : `${topology.boundaryEdges} bordes abiertos · ${topology.nonManifoldEdges} aristas no-manifold`;
+      meshState.last = { label, name, format, stats: fused.stats, metadatos, saved: savedTo, ms, bytes: bytes.byteLength };
       setMeshStatus(
-        `${name}: ${formatCount(fused.stats.vertices)} vértices · ${formatCount(fused.stats.triangles)} triángulos · ${(glb.byteLength / 1e6).toFixed(2)} MB · render ${Math.round(msRender)} ms · fusión ${Math.round(fused.ms)} ms` +
+        `${name}: ${formatCount(fused.stats.vertices)} vértices · ${formatCount(fused.stats.triangles)} triángulos · ${(bytes.byteLength / 1e6).toFixed(2)} MB · ${topologyText} · render ${Math.round(msRender)} ms · fusión ${Math.round(fused.ms)} ms` +
           (savedTo ? ` · guardado en ${savedTo.malla}` : " · descarga local") +
           (metadatos.aviso ? ` · aviso: ${metadatos.aviso}` : ""),
         metadatos.aviso ? "warn" : "ok"
       );
-      return { name, label, stats: fused.stats, metadatos, saved: savedTo, ms, bytes: glb.byteLength, glb: download ? null : glb, mesh: options.returnMesh ? mesh : null };
+      return {
+        name, label, format, stats: fused.stats, metadatos, saved: savedTo, ms, bytes: bytes.byteLength,
+        file: download ? null : bytes,
+        glb: format === "glb" && !download ? bytes : null,
+        threeMf: format === "3mf" && !download ? bytes : null,
+        mesh: options.returnMesh ? outputMesh : null,
+      };
     } catch (err) {
       setMeshStatus(`Malla fallida: ${err.message}`, "err");
       throw err;
@@ -2013,6 +2080,7 @@ async function main() {
       freezeFrame = false;
       meshState.running = false;
       meshEl.build.disabled = false;
+      syncMeshFormatControls();
     }
   }
 
