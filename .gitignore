@@ -26,6 +26,10 @@ chrome-webgpu*/
 artifacts/**
 !artifacts/README.md
 
+# Optional HF/ONNX weights (keep the README)
+models/**
+!models/README.md
+
 # Test tooling
 test-results/
 playwright-report/

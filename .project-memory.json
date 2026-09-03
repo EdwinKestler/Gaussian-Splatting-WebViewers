@@ -40,6 +40,7 @@
     ".vscode",
     "artifacts",
     "img_output",
+    "models",
     "node_modules",
     "playwright-report",
     "splats",

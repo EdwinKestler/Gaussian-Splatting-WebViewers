@@ -88,4 +88,6 @@ The browser never sees API keys; the sidecar reads `.env`. Everything but Grok n
 
 Tests: `npm test` (unit) and `npm run test:e2e` (Chromium WebGPU, offscreen); see [testing.md](testing.md).
 
+Hugging Face checkpoints are **not** required for steps 1–6. Optional SAM 2 / CLIP ONNX: `./scripts/download-models.sh` → `models/` (gitignored). Do not download ArtiFixer into this tree.
+
 Do **not** replace step 2 with Imagine/GPT-Image/Gemini image generation. Those APIs have no camera or opacity, so masks cannot lift back to Gaussians.

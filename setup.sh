@@ -6,6 +6,7 @@
 #   ./setup.sh --tests      also npm install (Node ≥ 22)
 #   ./setup.sh --e2e        also Playwright Chromium
 #   ./setup.sh --all        sidecar + tests + e2e
+#   ./setup.sh --models     also download optional SAM 2 / CLIP ONNX into models/
 #
 # Then: python3 -m http.server 8090 --bind 127.0.0.1
 #       ./semantic_sidecar/launch.sh
@@ -18,6 +19,7 @@ cd "$ROOT"
 WITH_SIDECAR=0
 WITH_TESTS=0
 WITH_E2E=0
+WITH_MODELS=0
 
 usage() {
   cat <<'EOF'
@@ -27,7 +29,8 @@ Prepare this repo on a new machine. Does not start HTTP servers.
   ./setup.sh --sidecar    also install Pillow (Python)
   ./setup.sh --tests      also npm install (Node ≥ 22)
   ./setup.sh --e2e        also Playwright Chromium
-  ./setup.sh --all        sidecar + tests + e2e
+  ./setup.sh --models     also download optional SAM 2 / CLIP ONNX into models/
+  ./setup.sh --all        sidecar + tests + e2e + models
 
 Then:
   python3 -m http.server 8090 --bind 127.0.0.1
@@ -43,7 +46,8 @@ while [[ $# -gt 0 ]]; do
     --sidecar) WITH_SIDECAR=1 ;;
     --tests) WITH_TESTS=1 ;;
     --e2e) WITH_TESTS=1; WITH_E2E=1 ;;
-    --all) WITH_SIDECAR=1; WITH_TESTS=1; WITH_E2E=1 ;;
+    --models) WITH_MODELS=1 ;;
+    --all) WITH_SIDECAR=1; WITH_TESTS=1; WITH_E2E=1; WITH_MODELS=1 ;;
     *) echo "unknown flag: $1" >&2; usage 1 ;;
   esac
   shift
@@ -107,14 +111,15 @@ else
 fi
 
 echo "==> directories"
-mkdir -p splats img_output artifacts
+mkdir -p splats img_output artifacts models
 chmod +x \
   setup.sh \
   semantic_sidecar/launch.sh \
   gaussian_splatting_webgpu/launch-webgpu-chrome.sh \
   scripts/vendor-gaussforge.sh \
+  scripts/download-models.sh \
   2>/dev/null || true
-ok "splats/  img_output/  artifacts/"
+ok "splats/  img_output/  artifacts/  models/"
 
 if [[ -f gaussian_splatting_webgpu/demo.ply ]]; then
   ok "demo scene: gaussian_splatting_webgpu/demo.ply"
@@ -157,6 +162,12 @@ elif [[ "${WITH_SIDECAR}" -eq 1 ]]; then
   fi
 else
   warn "Pillow not installed (needed for ./semantic_sidecar/launch.sh). Re-run: ./setup.sh --sidecar"
+fi
+
+if [[ "${WITH_MODELS}" -eq 1 ]]; then
+  echo "==> optional ONNX (SAM 2 + CLIP → models/)"
+  warn "not required for Grok/Imagine on main"
+  "$ROOT/scripts/download-models.sh"
 fi
 
 if [[ "${WITH_TESTS}" -eq 1 ]]; then
