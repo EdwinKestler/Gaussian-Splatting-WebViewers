@@ -1,0 +1,103 @@
+/**
+ * F6 acceptance (plan §4 "F6 Malla", milestone H4): "Malla" on an instance
+ * produces a GLB. Sphere A of the synthetic scene is orbited (depth + colour),
+ * fused into a TSDF in the worker and extracted with surface nets; the mesh is
+ * a closed surface whose mean radius matches the sphere within the documented
+ * margin, the GLB is a valid glTF 2.0 container, the sidecar (mocked) receives
+ * it for artifacts/mallas/, and instancias.json carries the `malla` path.
+ */
+import { test, expect } from "@playwright/test";
+
+const VIEWER_PAGE = "/gaussian_splatting_webgpu/index.html?offscreen=1&scene=synthetic";
+const SIDECAR = "http://127.0.0.1:8766";
+const CORS = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "Content-Type", "Access-Control-Allow-Methods": "GET, POST, OPTIONS" };
+/** Documented margin: alpha-weighted mean depth over-estimates the sphere radius by the splat extent (≈ 7 % on the synthetic sphere). */
+const RADIUS_TOLERANCE = 0.12;
+
+test.setTimeout(180_000);
+
+test.beforeEach(async ({ page }) => {
+  page.on("console", (msg) => {
+    if (msg.type() === "error" || /^\[malla\]/.test(msg.text()) && !/vista \d+\//.test(msg.text())) console.log(`[browser:${msg.type()}] ${msg.text().slice(0, 300)}`);
+  });
+  page.on("pageerror", (err) => console.log(`[browser:pageerror] ${err.message}`));
+});
+
+test("Malla: sphere A → closed GLB with the right radius, saved through /mallas and referenced by instancias.json", async ({ page }) => {
+  const calls = [];
+  await page.route(`${SIDECAR}/**`, async (route) => {
+    const req = route.request();
+    if (req.method() === "OPTIONS") return route.fulfill({ status: 204, headers: CORS });
+    const url = new URL(req.url());
+    if (url.pathname !== "/mallas") return route.fulfill({ status: 404, headers: CORS, body: "{}" });
+    const body = req.postDataJSON();
+    const glb = Buffer.from(body.glb_b64, "base64");
+    calls.push({ escena: body.escena, id_instancia: body.id_instancia, magic: glb.subarray(0, 4).toString("ascii"), bytes: glb.length, metadatos: body.metadatos });
+    return route.fulfill({ status: 200, headers: { ...CORS, "Content-Type": "application/json" }, body: JSON.stringify({ ok: true, carpeta: `artifacts/mallas/${body.escena}`, malla: `artifacts/mallas/${body.escena}/${body.id_instancia}.glb`, bytes: glb.length, metadatos: null }) });
+  });
+  await page.goto(VIEWER_PAGE);
+  await page.waitForFunction(() => window.__gsViewer?.name === "synthetic-two-spheres" && !!window.__gsMesh, null, { timeout: 60_000 });
+  await page.waitForFunction(() => window.__gsInstances.project([-1, 0, 0]) !== null, null, { timeout: 15_000 });
+  await expect(page.locator("#mesh-panel h2")).toHaveText("Malla");
+  expect(await page.locator('#inst-list button[data-act="mesh"]').count(), "botón Malla por instancia").toBe(2);
+
+  const r = await page.evaluate(async () => {
+    const r = await window.__gsMesh.build(1, { views: 12, resolution: 48, edge: 160, download: false, save: true, returnMesh: true });
+    const { decodeGlbHeader } = await import("/shared/glb.js");
+    const h = decodeGlbHeader(r.glb);
+    const prim = h.json.meshes[0].primitives[0];
+    return {
+      name: r.name, stats: r.stats, saved: r.saved, bytes: r.bytes, aviso: r.metadatos.aviso, metodo: r.metadatos.metodo,
+      glb: { version: h.version, length: h.length, attributes: Object.keys(prim.attributes).sort(), indexCount: h.json.accessors[prim.indices].count, extras: h.json.extras },
+      status: document.getElementById("mesh-status").textContent,
+      restored: { isolate: window.__gsRenderer.params.isolateLabel, target: window.__gsCamera.target.map((v) => +v.toFixed(3)) },
+      malla: window.__gsNames.entries().find((e) => e.label === 1) && window.__gsSegment.build().json.instancias[0].malla,
+    };
+  });
+  console.log(`[f6] ${JSON.stringify({ ...r, stats: { ...r.stats, bbox: undefined } })}`);
+  expect(r.name).toBe("synthetic-two-spheres_instancia-1.glb");
+  expect(r.stats.vertices).toBeGreaterThan(500);
+  expect(r.stats.components).toBe(1);
+  expect(Math.abs(r.stats.meanRadius - 0.5) / 0.5, "radio medio de la esfera A (0,5)").toBeLessThan(RADIUS_TOLERANCE);
+  expect(r.stats.maxRadius / r.stats.minRadius, "superficie casi esférica").toBeLessThan(1.25);
+  for (let a = 0; a < 3; a++) expect(Math.abs(r.stats.centroid[a] - [-1, 0, 0][a])).toBeLessThan(0.03);
+  expect(r.metodo.extraccion).toBe("surface-nets");
+  expect(r.metodo.vistas).toBe(12);
+  expect(r.aviso).toMatch(/3DGS vainilla/);
+  expect(r.glb.version).toBe(2);
+  expect(r.glb.length).toBe(r.bytes);
+  expect(r.glb.attributes).toEqual(["COLOR_0", "NORMAL", "POSITION"]);
+  expect(r.glb.indexCount).toBe(r.stats.triangles * 3);
+  expect(r.glb.extras.id_instancia).toBe(1);
+  expect(r.saved.malla).toBe("artifacts/mallas/synthetic-two-spheres/1.glb");
+  expect(r.malla, "instancias.json referencia la malla").toBe("artifacts/mallas/synthetic-two-spheres/1.glb");
+  expect(r.status).toMatch(/^synthetic-two-spheres_instancia-1\.glb: .* guardado en artifacts\/mallas/);
+  expect(r.restored.isolate, "el aislamiento se restaura").toBe(0);
+  expect(r.restored.target, "la cámara vuelve a su objetivo").toEqual([0, 0, 0]);
+  expect(calls).toHaveLength(1);
+  expect(calls[0].magic).toBe("glTF");
+  expect(calls[0].id_instancia).toBe(1);
+  expect(calls[0].metadatos.malla.vertices).toBe(r.stats.vertices);
+});
+
+test("Malla: mesh colour follows the instance colour and the median-depth path also works", async ({ page }) => {
+  await page.route(`${SIDECAR}/**`, (route) => route.abort("connectionrefused"));
+  await page.goto(VIEWER_PAGE);
+  await page.waitForFunction(() => window.__gsViewer?.name === "synthetic-two-spheres" && !!window.__gsMesh, null, { timeout: 60_000 });
+  await page.waitForFunction(() => window.__gsInstances.project([1, 0, 0]) !== null, null, { timeout: 15_000 });
+  const r = await page.evaluate(async () => {
+    const r = await window.__gsMesh.build(2, { views: 8, resolution: 40, edge: 128, depth: "mediana", download: false, save: true, returnMesh: true });
+    const m = r.mesh;
+    let red = 0, blue = 0;
+    for (let i = 0; i < m.vertexCount; i++) { red += m.colors[i * 3]; blue += m.colors[i * 3 + 2]; }
+    return { vertices: m.vertexCount, red: red / m.vertexCount, blue: blue / m.vertexCount, meanRadius: r.stats.meanRadius, saved: r.saved, status: document.getElementById("mesh-status").textContent, profundidad: r.metadatos.metodo.profundidad };
+  });
+  console.log(`[f6] esfera B (mediana): ${JSON.stringify(r)}`);
+  expect(r.profundidad).toBe("mediana");
+  expect(r.vertices).toBeGreaterThan(200);
+  expect(r.red, "la esfera B es naranja: rojo alto").toBeGreaterThan(0.6);
+  expect(r.blue, "la esfera B es naranja: azul bajo").toBeLessThan(0.4);
+  expect(Math.abs(r.meanRadius - 0.5) / 0.5).toBeLessThan(RADIUS_TOLERANCE);
+  expect(r.saved).toBeNull();
+  expect(r.status).toMatch(/· descarga local/);
+});

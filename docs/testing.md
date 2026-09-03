@@ -35,17 +35,34 @@ Si el patrón no encuentra ficheros, `node --test` termina con código 0 y cero 
 Cubren `shared/splat-io.js` (PLY 3DGS/2DGS/nube de puntos, `.splat` de 32 y 44 bytes, SH0–3,
 filas con escalas no finitas, entrada `SharedArrayBuffer`, submuestreo y `boundsFromGaussians`)
 con ficheros construidos en memoria; no tocan disco ni red.
+`tests/unit/graph.test.mjs` cubre `shared/graph.js`: kNN contra fuerza bruta, CSR simétrico sin duplicados,
+pesos Mahalanobis + color, dos blobs → 2 componentes, puntos aislados, difusión de etiquetas y un
+presupuesto de tiempo (250 k gaussianas, variable `GRAPH_BUDGET_MS_250K`). El criterio «1 M gaussianas
+en < 3 s en un portátil» se mide con `node scripts/bench-graph.mjs 1000000` (`GRAPH_BUDGET_MS`).
+`tests/unit/naming.test.mjs` cubre `shared/naming.js` (encuadre de instancias, búsqueda normalizada, fusión de nombres).
+`tests/unit/lift.test.mjs` cubre `shared/lift.js` con matrices de contribución simuladas: argmax con sesgo de
+fondo, histogramas y contención, asociación con ids permutados y vistas parciales, `liftViews` de extremo a
+extremo (IoU > 0,9) y el esquema de `instancias.json`.
 
 ## Pruebas e2e con WebGPU
 
 | Fichero | Cubre |
 | --- | --- |
 | `tests/e2e/smoke.spec.mjs` | Adaptador WebGPU, `splat-io` en el navegador, cómputo + render *offscreen* bajo SwiftShader, `parse-worker.js` con GaussForge vendorizado y el CDN bloqueado (criterio F0 «carga sin red») |
+| `tests/e2e/f6-mesh.spec.mjs` | Aceptación F6 (H4): «Malla» sobre la esfera A → GLB glTF 2.0 válido (POSITION/NORMAL/COLOR_0) con radio medio dentro del margen documentado (±12 %, la profundidad media sobreestima el radio por la extensión de los splats), una sola componente, cámara y aislamiento restaurados, `/mallas` recibe el GLB e `instancias.json` lleva `malla`; esfera B con profundidad mediana (K-buffer) conserva su color naranja |
+| `tests/e2e/f5-edit.spec.mjs` | Aceptación F5 (sidecar simulado): esfera 3D → nueva instancia, rectángulo en modo «quitar» → fondo, mover una esfera y comprobarlo en el pase ID, duplicar/borrar/deshacer/fusionar/renombrar, exportar una instancia como PLY con `instance_id` (traslación horneada) y la escena como SPZ (GaussForge), recargar el PLY muestra sólo ese objeto con su instancia, reproducir `ops.jsonl` sobre una escena nueva da la misma huella; botones del HUD, Ctrl+Z y exportación sin sidecar |
+| `tests/e2e/f4-ml-browser.spec.mjs` | *Opcional* (`ML_E2E=1` + `scripts/download-ml-models.sh`): SAM 2.1 en el navegador (transformers.js, WASM) levanta las dos esferas en exactamente 2 instancias desde indicaciones de superpuntos, CLIP incrusta los recortes aislados y «an orange ball» / «a blue sphere» eligen la esfera correcta, la exportación lleva `embedding_clip` unitario de 512 d. ≈ 1 min bajo SwiftShader |
+| `tests/e2e/f4-naming.spec.mjs` | Aceptación F4 con el sidecar simulado por `page.route` (sin clave): recorte aislado por instancia (sólo sus gaussianas, fondo blanco, cámara restaurada), `/name` → nombre_es/categoría/confianza en el panel, búsqueda con acentos y selección con Intro, exportación con nombres, tarjeta Imagine ligada a `id_instancia`, error claro sin sidecar |
+| `tests/e2e/f3-lift.spec.mjs` | Aceptación F3: el pase K-buffer da contribuciones exactas (0 gaussianas mal asignadas desde una vista) y la profundidad mediana analítica; 6 vistas con ids permutados → 2 instancias con IoU 3D > 0,9 tras asociación por superpuntos y difusión; el visor levanta con la fuente «prueba» y exporta `instancias.json` |
+| `tests/e2e/f2-groups.spec.mjs` | Aceptación F2: el grafo del worker separa las dos esferas en exactamente 2 grupos, la vista «Grupos» las colorea distinto (lectura *offscreen*), un clic con la vista activa convierte el grupo en instancia y `Difundir etiquetas` respeta las etiquetas limpias |
 | `tests/e2e/f1-identity.spec.mjs` | Aceptación F1 sobre la escena sintética de dos esferas (`shared/synthetic.js`): `selftest.html`, ID/`pick()`, ocultar/aislar, profundidad < 1 %, normales, transformación por instancia, clic en el visor (`?scene=synthetic&offscreen=1`). El arnés vive en `tests/e2e/pages/` |
 
 
 ```bash
 npm run test:e2e                # npx playwright test
+ML_E2E=1 npx playwright test tests/e2e/f4-ml-browser.spec.mjs   # modelos en el navegador (pesos en vendor/ml/)
+# Sin vendor/ml/ el visor carga transformers.js desde jsDelivr y los pesos desde el Hub (misma
+# ruta que GaussForge sin vendor/): útil con red, imposible en un Chromium sin salida a Internet.
 npx playwright test --headed    # ver el navegador (requiere pantalla)
 npx playwright test -g "adapter"   # filtrar por título
 ```

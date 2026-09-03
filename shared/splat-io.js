@@ -711,6 +711,41 @@ function plyToCloud(buffer) {
 }
 
 /**
+ * Read whole columns of a PLY by property name (F5: `instance_id`, `class_id`,
+ * `confidence` written by shared/export-io.js). Missing names are omitted from
+ * the result; integer columns and the names in `intNames` (ids stored as float
+ * for tool compatibility) come back as Uint32Array, the rest as Float32Array.
+ * @returns {{[name: string]: Uint32Array|Float32Array}}
+ */
+export function readPlyColumns(input, names, intNames = ["instance_id", "class_id"]) {
+  const buffer = asArrayBuffer(input);
+  const { format, vertexCount, properties, headerEnd } = decodePlyHeader(buffer);
+  const { offsets, types, rowSize, has } = indexProperties(properties);
+  const wanted = names.filter((n) => has(n));
+  const out = {};
+  const isInt = (t) => /int|char|short/.test(t);
+  for (const n of wanted) out[n] = isInt(types[n]) || intNames.includes(n) ? new Uint32Array(vertexCount) : new Float32Array(vertexCount);
+  if (!wanted.length) return out;
+  if (format === "ascii") {
+    const lines = asciiRows(buffer, headerEnd, vertexCount);
+    const col = new Map(properties.map((p, k) => [p.name, k]));
+    for (let i = 0; i < vertexCount; i++) {
+      const parts = lines[i].trim().split(/\s+/);
+      for (const n of wanted) out[n][i] = parseFloat(parts[col.get(n)]);
+    }
+  } else {
+    const le = format === "binary_le";
+    assertBinaryBody(buffer, headerEnd, vertexCount, rowSize);
+    const view = new DataView(buffer, headerEnd);
+    for (let i = 0; i < vertexCount; i++) {
+      const base = i * rowSize;
+      for (const n of wanted) out[n][i] = readNumeric(view, base + offsets[n], types[n], le);
+    }
+  }
+  return out;
+}
+
+/**
  * Header-only summary of a PLY for HUDs and tests (no vertex data is decoded):
  *   { vertexCount, properties: [names], shDegree, variant, encoding }
  * `encoding` is "binary_le" | "binary_be" | "ascii". Throws if the buffer does

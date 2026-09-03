@@ -1,4 +1,4 @@
-import { toGaussianCloud, boundsFromGaussians } from "../shared/splat-io.js";
+import { toGaussianCloud, boundsFromGaussians, readPlyColumns } from "../shared/splat-io.js";
 
 // Copia vendorizada (vendor/gaussforge/, ver NOTICE.md): funciona sin red.
 const GAUSSFORGE_VENDOR_URL = new URL("../vendor/gaussforge/index.web.js", import.meta.url).href;
@@ -104,6 +104,7 @@ function finishCloud(cloud, extra) {
     decoder: extra.decoder,
     decoderSource: extra.decoderSource || "",
     format: extra.format,
+    variant: cloud.variant || (cloud.meta && cloud.meta.variant) || null,
     shDegree: cloud.shDegree,
     count: reduced.count,
     gaussians: reduced.gaussians,
@@ -183,6 +184,23 @@ function decodeFallback(buffer, name, compression) {
   });
 }
 
+/** instance_id column of a PLY (if any), downsampled like the cloud (every k-th row). */
+function plyInstanceLabels(buffer, name, compression, count) {
+  try {
+    if (detectGaussFormat(buffer, name) !== "ply") return null;
+    const cols = readPlyColumns(buffer, ["instance_id"]);
+    const full = cols.instance_id;
+    if (!full) return null;
+    if (full.length === count) return full;
+    const out = new Uint32Array(count);
+    for (let i = 0; i < count; i++) out[i] = full[Math.floor((i * full.length) / count)];
+    return out;
+  } catch (err) {
+    console.warn(`[parse-worker] instance_id no legible: ${errorText(err)}`);
+    return null;
+  }
+}
+
 self.onmessage = async (event) => {
   const data = event.data || {};
   const id = data.id;
@@ -190,8 +208,10 @@ self.onmessage = async (event) => {
   if (data.type === "convert") {
     try {
       const gf = await getForge();
-      if (!lastInput) throw new Error("No decoded model to export");
-      const converted = await gf.convert(lastInput.bytes, lastInput.format, data.outFormat || "ply");
+      // F5: convert explicit bytes (an export baked in the main thread) instead of the loaded file.
+      const src = data.buffer ? { bytes: new Uint8Array(data.buffer), format: data.inFormat || detectGaussFormat(data.buffer, data.name || "") } : lastInput;
+      if (!src) throw new Error("No decoded model to export");
+      const converted = await gf.convert(src.bytes, src.format, data.outFormat || "ply");
       if (converted.error) throw new Error(converted.error);
       self.postMessage(
         { id, ok: true, type: "convert", outFormat: data.outFormat, bytes: converted.data },
@@ -212,7 +232,14 @@ self.onmessage = async (event) => {
       decoded = decodeFallback(data.buffer, data.name || "", data.compression || 1);
       decoded.warning = `GaussForge: ${errorText(forgeErr)}; used built-in decoder`;
     }
+    // F5: a PLY exported with instance_id brings its instances back.
+    const labels = plyInstanceLabels(data.buffer, data.name || "", data.compression || 1, decoded.count);
+    if (labels) {
+      decoded.labels = labels;
+      decoded.labelSource = "instance_id";
+    }
     const transfer = [decoded.gaussians.buffer, decoded.sh.buffer];
+    if (labels) transfer.push(labels.buffer);
     self.postMessage({ id, ok: true, ...decoded }, transfer);
   } catch (err) {
     self.postMessage({ id, ok: false, error: errorText(err) });

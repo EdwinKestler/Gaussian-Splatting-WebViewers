@@ -18,11 +18,22 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 ROOT = Path(__file__).resolve().parents[1]
 ENV_PATH = ROOT / ".env"
 OUTPUT_DIR = ROOT / "img_output"
+SEGMENT_DIR = ROOT / "artifacts" / "segmentaciones"
+EXPORT_DIR = ROOT / "artifacts" / "exportaciones"
+MESH_DIR = ROOT / "artifacts" / "mallas"
+EXPORT_FORMATS = {"ply", "splat", "spz", "compressed.ply", "ksplat", "sog"}
+# Optional SAM backend: "package.module:function"; function(image: PIL.Image, prompts: list[str])
+# -> (labels: list[list[int]] | array HxW (0 = fondo, k = object k), objects: list[{"id", "name", ...}])
+SAM_BACKEND = os.environ.get("SAM_BACKEND", "")
+MAX_MASK_OBJECTS = 255
+# F4 naming backend: "grok" (vision VQA) or "mock" (deterministic, for tests without keys)
+NAME_BACKEND = os.environ.get("NAME_BACKEND", "grok")
+MAX_NAME_INSTANCES = 64
 HOST = os.environ.get("SIDECAR_HOST", "127.0.0.1")
 PORT = int(os.environ.get("SIDECAR_PORT", "8766"))
 XAI_BASE = "https://api.x.ai/v1"
@@ -59,6 +70,12 @@ box is normalized 0-1 [left, top, width, height] in the image.
 Prefer instance-level names (dining table, mesh office chair) over generic (object, thing).
 Prefer real-world labels even if the render is slightly blurry (garden bed, planter, foliage, wall, path).
 Only use name "unrecognized splat field" if there is no identifiable structure at all.
+"""
+
+NAME_PROMPT = """You see ONE object isolated from a 3D Gaussian Splatting scene (background removed).
+Name it. Return JSON only, no markdown:
+{"nombre":"short English name","nombre_es":"nombre corto en espanol","categoria":"one of: mobiliario, electrodomestico, decoracion, vegetacion, estructura, vehiculo, persona, animal, herramienta, alimento, otro","confianza":0.0,"descripcion_es":"una frase en espanol"}
+If it is not recognisable, use nombre "unrecognized fragment", nombre_es "fragmento sin identificar", categoria "otro", confianza <= 0.3.
 """
 
 CARD_PROMPT = (
@@ -359,6 +376,305 @@ def analyze(body: dict) -> dict:
     }
 
 
+# ----------------------------------------------------------------- F4 names
+
+NAME_CATEGORIES = {
+    "mobiliario", "electrodomestico", "decoracion", "vegetacion", "estructura", "vehiculo",
+    "persona", "animal", "herramienta", "alimento", "otro",
+}
+
+
+def clean_name_result(parsed: dict, hint: str) -> dict:
+    nombre = str(parsed.get("nombre") or hint or "objeto").strip()[:80]
+    nombre_es = str(parsed.get("nombre_es") or nombre).strip()[:80]
+    categoria = str(parsed.get("categoria") or "otro").strip().lower()
+    if categoria not in NAME_CATEGORIES:
+        categoria = "otro"
+    try:
+        confianza = max(0.0, min(1.0, float(parsed.get("confianza", 0.5))))
+    except (TypeError, ValueError):
+        confianza = 0.5
+    return {
+        "nombre": nombre,
+        "nombre_es": nombre_es,
+        "categoria": categoria,
+        "confianza": confianza,
+        "descripcion_es": str(parsed.get("descripcion_es") or "")[:200],
+    }
+
+
+def name_with_grok(image: Image.Image, hint: str) -> dict:
+    b64 = encode_png(image, 768)
+    data_url = f"data:image/png;base64,{b64}"
+    prompt = NAME_PROMPT + (f"Hint from a coarse detector: {hint}.\n" if hint else "")
+    payload = {
+        "model": VISION_MODEL,
+        "temperature": 0,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": data_url, "detail": "high"}},
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ],
+    }
+    resp = xai_request("/chat/completions", payload, timeout=180)
+    text = resp["choices"][0]["message"]["content"]
+    return clean_name_result(extract_json(text), hint)
+
+
+def name_with_mock(image: Image.Image, hint: str, index: int) -> dict:
+    """Deterministic names for tests: derived from the hint and the image mean colour."""
+    small = image.convert("RGB").resize((8, 8))
+    pixels = list(small.getdata())
+    mean = sum(sum(px) for px in pixels) / (3 * len(pixels))
+    tone = "claro" if mean > 128 else "oscuro"
+    base = hint or f"objeto {index}"
+    return clean_name_result(
+        {
+            "nombre": base,
+            "nombre_es": f"{base} ({tone})",
+            "categoria": "otro",
+            "confianza": 0.5,
+            "descripcion_es": f"nombre simulado (mock) para {base}",
+        },
+        hint,
+    )
+
+
+def name_instances(body: dict) -> dict:
+    """POST /name: {instances:[{id, hint, png_b64}], backend?} -> names per instance (plan F4)."""
+    items = (body.get("instances") or [])[:MAX_NAME_INSTANCES]
+    if not items:
+        raise RuntimeError("No instances provided")
+    backend = str(body.get("backend") or NAME_BACKEND)
+    if backend not in ("grok", "mock"):
+        raise RuntimeError(f"backend de nombres desconocido: {backend}")
+    out = []
+    for k, item in enumerate(items):
+        image = decode_png(item.get("png_b64") or "")
+        hint = str(item.get("hint") or "")[:80]
+        try:
+            if backend == "mock":
+                result = name_with_mock(image, hint, k + 1)
+            else:
+                result = name_with_grok(image, hint)
+            result["ok"] = True
+        except Exception as err:  # keep going: one failed instance must not lose the rest
+            result = {
+                "ok": False,
+                "error": str(err)[:300],
+                "nombre": hint or "",
+                "nombre_es": hint or "",
+                "categoria": "otro",
+                "confianza": 0.0,
+            }
+        result["id_instancia"] = int(item.get("id", k + 1))
+        out.append(result)
+    return {
+        "ok": True,
+        "backend": backend,
+        "vision_model": VISION_MODEL if backend == "grok" else None,
+        "instances": out,
+    }
+
+
+# ----------------------------------------------------------------- F3 masks
+
+
+def boxes_to_mask(size: tuple[int, int], objects: list[dict]) -> Image.Image:
+    """Rasterise Grok boxes into an 8-bit label image (0 = fondo, k = object k).
+
+    Larger boxes are painted first so smaller objects stay on top; the inscribed
+    ellipse of each box is used to limit background bleed at the corners.
+    """
+    w, h = size
+    mask = Image.new("L", (w, h), 0)
+    draw = ImageDraw.Draw(mask)
+    order = sorted(range(len(objects)), key=lambda i: -(objects[i]["box"][2] * objects[i]["box"][3]))
+    for i in order:
+        x, y, bw, bh = objects[i]["box"]
+        x0 = max(0, int(x * w))
+        y0 = max(0, int(y * h))
+        x1 = min(w - 1, int((x + bw) * w))
+        y1 = min(h - 1, int((y + bh) * h))
+        if x1 - x0 < 2 or y1 - y0 < 2:
+            continue
+        draw.ellipse((x0, y0, x1, y1), fill=i + 1)
+    return mask
+
+
+def load_sam_backend():
+    if not SAM_BACKEND or ":" not in SAM_BACKEND:
+        raise RuntimeError(
+            "backend SAM no configurado: define SAM_BACKEND=paquete.modulo:funcion "
+            "(funcion(imagen PIL, prompts) -> (etiquetas HxW, objetos)) en .env"
+        )
+    module_name, func_name = SAM_BACKEND.split(":", 1)
+    module = __import__(module_name, fromlist=[func_name])
+    return getattr(module, func_name)
+
+
+def labels_to_mask_image(labels, size: tuple[int, int]) -> Image.Image:
+    w, h = size
+    flat = []
+    for row in labels:
+        flat.extend(int(v) for v in row)
+    if len(flat) != w * h:
+        raise RuntimeError(f"el backend devolvio {len(flat)} etiquetas para {w}x{h} pixeles")
+    if max(flat, default=0) > MAX_MASK_OBJECTS:
+        raise RuntimeError(f"mas de {MAX_MASK_OBJECTS} objetos por vista no caben en una mascara de 8 bits")
+    img = Image.new("L", (w, h))
+    img.putdata(flat)
+    return img
+
+
+def encode_mask_png(mask: Image.Image) -> str:
+    buf = io.BytesIO()
+    mask.save(buf, format="PNG", optimize=True)
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def segment_views(body: dict) -> dict:
+    """POST /segment: per-view label masks for the WebGPU viewer's lift (plan F3)."""
+    views_in = (body.get("views") or [])[:MAX_VIEWS]
+    if not views_in:
+        raise RuntimeError("No views provided")
+    backend = str(body.get("backend") or "auto")
+    prompts = [str(p)[:80] for p in (body.get("prompts") or [])][:32]
+    if backend == "auto":
+        backend = "sam" if SAM_BACKEND else "grok-boxes"
+    sam = load_sam_backend() if backend == "sam" else None
+    out_views = []
+    for item in views_in:
+        image = decode_png(item.get("png_b64") or "")
+        if backend == "grok-boxes":
+            objects = vision_tag(image)[:MAX_MASK_OBJECTS]
+            mask = boxes_to_mask(image.size, objects)
+            objs = [
+                {"id": i + 1, "name": o["name"], "confidence": o["confidence"], "box": o["box"]}
+                for i, o in enumerate(objects)
+            ]
+        elif backend == "sam":
+            labels, objs_raw = sam(image, prompts)
+            mask = labels_to_mask_image(labels, image.size)
+            objs = [
+                {"id": int(o.get("id", i + 1)), "name": str(o.get("name", f"objeto {i + 1}"))[:80],
+                 "confidence": float(o.get("confidence", 0.5))}
+                for i, o in enumerate(objs_raw)
+            ]
+        else:
+            raise RuntimeError(f"backend desconocido: {backend}")
+        out_views.append(
+            {
+                "width": image.size[0],
+                "height": image.size[1],
+                "mask_png_b64": encode_mask_png(mask),
+                "objects": objs,
+            }
+        )
+    return {"ok": True, "backend": backend, "vision_model": VISION_MODEL if backend == "grok-boxes" else None, "views": out_views}
+
+
+def save_export(body: dict) -> dict:
+    """POST /exportaciones (F5): persist an exported instance/scene under artifacts/exportaciones/<escena>/."""
+    formato = str(body.get("formato") or "")
+    if formato not in EXPORT_FORMATS:
+        raise RuntimeError(f"formato no admitido: {formato!r} (admitidos: {', '.join(sorted(EXPORT_FORMATS))})")
+    raw = base64.b64decode(body.get("bytes_b64") or "")
+    if not raw:
+        raise RuntimeError("bytes_b64 vacío")
+    escena = slug(str(body.get("escena") or "escena"))
+    label = body.get("id_instancia")
+    if label is not None and (not isinstance(label, int) or label < 0):
+        raise RuntimeError("id_instancia debe ser un entero no negativo o null")
+    folder = EXPORT_DIR / escena
+    folder.mkdir(parents=True, exist_ok=True)
+    stem = f"instancia-{label}" if label is not None else "escena"
+    out = folder / f"{stem}.{formato}"
+    out.write_bytes(raw)
+    meta = body.get("metadatos")
+    meta_path = None
+    if isinstance(meta, dict):
+        meta_path = folder / f"{stem}.json"
+        meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    ops = body.get("ops_jsonl")
+    ops_path = None
+    if isinstance(ops, str) and ops.strip():
+        ops_path = folder / "ops.jsonl"
+        ops_path.write_text(ops if ops.endswith("\n") else ops + "\n", encoding="utf-8")
+    return {
+        "ok": True,
+        "carpeta": str(folder.relative_to(ROOT)),
+        "archivo": str(out.relative_to(ROOT)),
+        "bytes": len(raw),
+        "metadatos": str(meta_path.relative_to(ROOT)) if meta_path else None,
+        "ops": str(ops_path.relative_to(ROOT)) if ops_path else None,
+    }
+
+
+def save_mesh(body: dict) -> dict:
+    """POST /mallas (F6): persist a per-instance GLB under artifacts/mallas/<escena>/<id_instancia>.glb."""
+    raw = base64.b64decode(body.get("glb_b64") or "")
+    if len(raw) < 20 or raw[:4] != b"glTF":
+        raise RuntimeError("glb_b64 no contiene un GLB (magic glTF)")
+    label = body.get("id_instancia")
+    if not isinstance(label, int) or label < 0:
+        raise RuntimeError("id_instancia debe ser un entero no negativo")
+    escena = slug(str(body.get("escena") or "escena"))
+    folder = MESH_DIR / escena
+    folder.mkdir(parents=True, exist_ok=True)
+    out = folder / f"{label}.glb"
+    out.write_bytes(raw)
+    meta = body.get("metadatos")
+    meta_path = None
+    if isinstance(meta, dict):
+        meta_path = folder / f"{label}.json"
+        meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return {
+        "ok": True,
+        "carpeta": str(folder.relative_to(ROOT)),
+        "malla": str(out.relative_to(ROOT)),
+        "bytes": len(raw),
+        "metadatos": str(meta_path.relative_to(ROOT)) if meta_path else None,
+    }
+
+
+def save_segmentation(body: dict) -> dict:
+    """POST /segmentaciones: persist instancias.json + etiquetas.u32 under artifacts/."""
+    instancias = body.get("instancias")
+    if not isinstance(instancias, dict) or "instancias" not in instancias:
+        raise RuntimeError("falta el objeto instancias (esquema del plan §3.3)")
+    raw = base64.b64decode(body.get("etiquetas_b64") or "")
+    if not raw or len(raw) % 4:
+        raise RuntimeError("etiquetas_b64 debe contener u32 little-endian")
+    n = instancias.get("fuente", {}).get("n_gaussianas")
+    if n is not None and n * 4 != len(raw):
+        raise RuntimeError(f"etiquetas.u32 tiene {len(raw) // 4} valores, se esperaban {n}")
+    escena = slug(str(body.get("escena") or instancias.get("escena") or "escena"))
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M%S")
+    folder = SEGMENT_DIR / escena / stamp
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "instancias.json").write_text(json.dumps(instancias, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    (folder / "etiquetas.u32").write_bytes(raw)
+    ops = body.get("ops_jsonl")
+    if isinstance(ops, str) and ops.strip():
+        (folder / "ops.jsonl").write_text(ops if ops.endswith("\n") else ops + "\n", encoding="utf-8")
+    base = base64.b64decode(body.get("etiquetas_base_b64") or "")
+    if base and len(base) % 4 == 0:
+        (folder / "etiquetas_base.u32").write_bytes(base)  # ops.jsonl replays over these
+    return {
+        "ok": True,
+        "carpeta": str(folder.relative_to(ROOT)),
+        "instancias": str((folder / "instancias.json").relative_to(ROOT)),
+        "etiquetas": str((folder / "etiquetas.u32").relative_to(ROOT)),
+        "ops": str((folder / "ops.jsonl").relative_to(ROOT)) if isinstance(ops, str) and ops.strip() else None,
+        "n_instancias": len(instancias.get("instancias") or []),
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args) -> None:
         sys_stderr = __import__("sys").stderr
@@ -393,6 +709,11 @@ class Handler(BaseHTTPRequestHandler):
                     "vision_model": VISION_MODEL,
                     "imagine_model": IMAGINE_MODEL,
                     "img_output": str(OUTPUT_DIR),
+                    "segment_backends": ["grok-boxes"] + (["sam"] if SAM_BACKEND else []),
+                    "name_backend": NAME_BACKEND,
+                    "segmentaciones": str(SEGMENT_DIR),
+                    "exportaciones": str(EXPORT_DIR),
+                    "mallas": str(MESH_DIR),
                 },
             )
             return
@@ -413,6 +734,21 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/analyze":
                 self._json(200, analyze(body))
+                return
+            if path == "/name":
+                self._json(200, name_instances(body))
+                return
+            if path == "/segment":
+                self._json(200, segment_views(body))
+                return
+            if path == "/segmentaciones":
+                self._json(200, save_segmentation(body))
+                return
+            if path == "/exportaciones":
+                self._json(200, save_export(body))
+                return
+            if path == "/mallas":
+                self._json(200, save_mesh(body))
                 return
             if path == "/card":
                 img = decode_png(body.get("png_b64") or "")

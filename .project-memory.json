@@ -22,6 +22,7 @@
     "gaussian_splatting_webgpu/**/*.js",
     "gaussian_splatting_webgpu/**/*.sh",
     "shared/**/*.js",
+    "shared/**/*.json",
     "splat_converter/**/*.html",
     "splat_converter/**/*.js",
     "semantic_sidecar/**/*.md",
@@ -90,6 +91,56 @@
       "mode": "search",
       "query": "SwiftShader offscreen SELFTEST_OK WebGPU",
       "expected_paths": ["docs/testing.md"]
+    },
+    {
+      "mode": "search",
+      "query": "buildSuperpointGraph connectedComponents diffuseLabels kNN Mahalanobis superpoint",
+      "expected_paths": ["shared/graph.js"]
+    },
+    {
+      "mode": "search",
+      "query": "assignLabels associateMasks containment liftViews FlashSplat instancias.json",
+      "expected_paths": ["shared/lift.js"]
+    },
+    {
+      "mode": "search",
+      "query": "ContributionPass K-buffer resolve transmittance median depth chunks overflow",
+      "expected_paths": ["gaussian_splatting_webgpu/contrib-pass.js"]
+    },
+    {
+      "mode": "search",
+      "query": "BrowserSam BrowserClip transformers.js localModelPath labelMask embedImage",
+      "expected_paths": ["gaussian_splatting_webgpu/ml-browser.js"]
+    },
+    {
+      "mode": "search",
+      "query": "EditSession replay ops.jsonl bakeSession transformar duplicar fusionar",
+      "expected_paths": ["shared/edit-ops.js"]
+    },
+    {
+      "mode": "search",
+      "query": "encodePly encodeSplat32 instance_id class_id confidence exportFileName",
+      "expected_paths": ["shared/export-io.js"]
+    },
+    {
+      "mode": "search",
+      "query": "TsdfVolume integrate extract surface nets largestComponent orbitCameras",
+      "expected_paths": ["shared/tsdf.js"]
+    },
+    {
+      "mode": "search",
+      "query": "encodeGlb glTF binary chunk accessors bufferViews",
+      "expected_paths": ["shared/glb.js"]
+    },
+    {
+      "mode": "search",
+      "query": "validateAgainst loadSchema assertValid instancias.schema.json",
+      "expected_paths": ["shared/schemas.js"]
+    },
+    {
+      "mode": "search",
+      "query": "instanceBounds frameBounds searchInstances applyNames nombre_es categoria",
+      "expected_paths": ["shared/naming.js"]
     }
   ]
 }

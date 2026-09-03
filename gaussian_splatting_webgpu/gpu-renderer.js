@@ -232,6 +232,8 @@ struct Instance {
 @group(0) @binding(3) var<storage, read> sh_coeffs: array<f32>;
 @group(0) @binding(4) var<storage, read> labels: array<u32>;
 @group(0) @binding(5) var<storage, read> instances: array<Instance>;
+// F2: superpoint id + 1 per gaussian (0 = sin grupo), coloured by colour mode 4 (Grupos)
+@group(0) @binding(6) var<storage, read> groups: array<u32>;
 
 struct VSIn {
   @location(0) quad_pos: vec2<f32>,
@@ -355,6 +357,28 @@ fn empty_vertex(mode: f32) -> VSOut {
 }
 
 // Shared vertex logic for every output mode (colour/depth/normal/id).
+// Golden-ratio hue palette for group ids; mirrors groupColor() in shared/graph.js.
+fn group_color(g: u32) -> vec3<f32> {
+  if (g == 0u) { return vec3<f32>(0.35); }
+  let h = fract(f32(g) * 0.618033988749895);
+  let s = 0.65;
+  let v = 0.95;
+  let hh = h * 6.0;
+  let sector = i32(floor(hh)) % 6;
+  let f = hh - floor(hh);
+  let p = v * (1.0 - s);
+  let q = v * (1.0 - f * s);
+  let t = v * (1.0 - (1.0 - f) * s);
+  switch (sector) {
+    case 0: { return vec3<f32>(v, t, p); }
+    case 1: { return vec3<f32>(q, v, p); }
+    case 2: { return vec3<f32>(p, v, t); }
+    case 3: { return vec3<f32>(p, q, v); }
+    case 4: { return vec3<f32>(t, p, v); }
+    default: { return vec3<f32>(v, p, q); }
+  }
+}
+
 fn splat_vertex(input: VSIn) -> VSOut {
   let index = sorted_indices[input.instance_id];
   let g = gaussians[index];
@@ -402,7 +426,10 @@ fn splat_vertex(input: VSIn) -> VSOut {
 
   let color_mode = uniforms.color_mix.x;
   let luma = dot(rgb, vec3<f32>(0.2989, 0.5870, 0.1140));
-  if (color_mode > 2.5) {
+  if (color_mode > 3.5) {
+    // Grupos: palette by superpoint, shaded a little by the original luma
+    rgb = group_color(groups[index]) * (0.6 + 0.4 * luma);
+  } else if (color_mode > 2.5) {
     rgb = vec3<f32>(0.0, luma, 0.0);
   } else if (color_mode > 1.5) {
     let bw = select(0.1, 1.0, luma >= 0.5);
@@ -573,6 +600,41 @@ fn fs_main(input: VSOut) -> @location(0) vec4<f32> {
 }
 
 // Opaque ID pass: first gaussian with α ≥ threshold wins (depth test 'less').
+// ---- F3 K-buffer (contrib-pass.js): per-pixel list of (gaussian, alpha, depth)
+struct KParams {
+  width: u32,
+  height: u32,
+  k: u32,
+  alpha_min: f32, // fragments below this alpha are not recorded (negligible α·T)
+};
+struct KEntry {
+  index: u32, // gaussian index + 1
+  alpha: f32,
+  depth: f32, // view distance (-cam.z)
+};
+@group(1) @binding(0) var<uniform> k_params: KParams;
+@group(1) @binding(1) var<storage, read_write> k_counts: array<atomic<u32>>;
+@group(1) @binding(2) var<storage, read_write> k_entries: array<KEntry>;
+
+@fragment
+fn fs_contrib(input: VSOut) -> @location(0) vec4<f32> {
+  let alpha = splat_alpha(input);
+  if (alpha < 0.0 || alpha < k_params.alpha_min) {
+    discard;
+  }
+  let px = u32(input.position.x);
+  let py = u32(input.position.y);
+  if (px >= k_params.width || py >= k_params.height) {
+    discard;
+  }
+  let pixel = py * k_params.width + px;
+  let slot = atomicAdd(&k_counts[pixel], 1u);
+  if (slot < k_params.k) {
+    k_entries[pixel * k_params.k + slot] = KEntry(input.v_index, alpha, input.v_aux.w);
+  }
+  return vec4<f32>(0.0);
+}
+
 @fragment
 fn fs_id(input: VSOut) -> @location(0) u32 {
   let alpha = splat_alpha(input);
@@ -682,6 +744,7 @@ export class WebGPUSplatRenderer {
     this.shDegree = 0;
 
     this._labels = new Uint32Array(0);
+    this._groups = new Uint32Array(0);
     this._instanceData = new ArrayBuffer(MAX_INSTANCES * INSTANCE_BYTES);
     this._instanceF32 = new Float32Array(this._instanceData);
     this._instanceU32 = new Uint32Array(this._instanceData);
@@ -828,6 +891,7 @@ export class WebGPUSplatRenderer {
         vertexStorage(3),
         vertexStorage(4),
         vertexStorage(5),
+        vertexStorage(6),
       ],
     });
     this.renderPipelineLayout = this.device.createPipelineLayout({
@@ -923,6 +987,7 @@ export class WebGPUSplatRenderer {
     this.count = count;
     this.shDegree = shDegree || 0;
     this._labels = new Uint32Array(count);
+    this._groups = new Uint32Array(count);
     this._idCache = null;
     this._stateVersion++;
     if (count === 0) return;
@@ -938,6 +1003,7 @@ export class WebGPUSplatRenderer {
       this.depthKeyBuffer = createBuffer(this.device, indexSize * 2, storage);
       this.sortedBuffer = createBuffer(this.device, indexSize, storage);
       this.labelBuffer = createBuffer(this.device, indexSize, storage);
+      this.groupBuffer = createBuffer(this.device, indexSize, storage);
     }
     this.device.queue.writeBuffer(this.splatBuffer, 0, gaussians);
     const shData = sh && sh.length ? sh : new Float32Array(count * SH_FLOATS);
@@ -946,6 +1012,7 @@ export class WebGPUSplatRenderer {
     for (let i = 0; i < count; i++) identity[i] = i;
     this.device.queue.writeBuffer(this.sortedBuffer, 0, identity);
     this.device.queue.writeBuffer(this.labelBuffer, 0, this._labels);
+    this.device.queue.writeBuffer(this.groupBuffer, 0, this._groups);
     this._rebuildBindGroups();
   }
 
@@ -974,6 +1041,7 @@ export class WebGPUSplatRenderer {
         { binding: 3, resource: { buffer: this.shBuffer } },
         { binding: 4, resource: { buffer: this.labelBuffer } },
         { binding: 5, resource: { buffer: this.instanceBuffer } },
+        { binding: 6, resource: { buffer: this.groupBuffer } },
       ],
     });
   }
@@ -1004,6 +1072,44 @@ export class WebGPUSplatRenderer {
   /** @returns {Uint32Array} copy of the CPU label mirror (length = count). */
   getLabels() {
     return this._labels.slice();
+  }
+
+  // ---------------------------------------------------------------- groups (F2)
+
+  /**
+   * Replace the per-gaussian group ids shown by colour mode 4 (Grupos):
+   * superpoint id + 1, 0 = sin grupo. Any u32 is accepted (groups do not
+   * index the instance table). `null` clears.
+   * @param {Uint32Array|null} groups length must equal this.count
+   */
+  setGroups(groups) {
+    if (groups == null) {
+      this._groups.fill(0);
+    } else {
+      if (groups.length !== this.count) {
+        throw new Error(`groups length ${groups.length} != count ${this.count}`);
+      }
+      for (let i = 0; i < groups.length; i++) {
+        if (!isNonNegInt(groups[i]) || groups[i] > 0xffffffff) {
+          throw new Error(`groups[${i}] = ${groups[i]} must be a u32`);
+        }
+      }
+      this._groups.set(groups);
+    }
+    this._stateVersion++;
+    if (this.device && this.groupBuffer && this.count > 0) {
+      this.device.queue.writeBuffer(this.groupBuffer, 0, this._groups, 0, this.count);
+    }
+  }
+
+  /** @returns {Uint32Array} copy of the CPU group mirror (length = count). */
+  getGroups() {
+    return this._groups.slice();
+  }
+
+  /** Group id of one gaussian (0 = sin grupo / out of range). */
+  groupOf(index) {
+    return isNonNegInt(index) && index < this._groups.length ? this._groups[index] : 0;
   }
 
   /**
@@ -1522,7 +1628,7 @@ export class WebGPUSplatRenderer {
    * @param {number} x
    * @param {number} y
    * @param {{depth?: boolean}} [opts] depth: also read the expected depth at that pixel
-   * @returns {Promise<{index:number, label:number, depth:number|null}>} index -1 = nothing
+   * @returns {Promise<{index:number, label:number, group:number, depth:number|null}>} index -1 = nothing; group = superpoint id + 1 (0 = sin grupo)
    */
   async pick(x, y, opts = {}) {
     const frame = await this._idFrame();
@@ -1533,13 +1639,30 @@ export class WebGPUSplatRenderer {
       index = frame.data[py * frame.width + px] - 1;
     }
     const label = index >= 0 && index < this._labels.length ? this._labels[index] : 0;
+    const group = index >= 0 && index < this._groups.length ? this._groups[index] : 0;
     let depth = null;
     if (opts && opts.depth && index >= 0) {
       const d = await this.renderOffscreen({ mode: OUTPUT_MODE.DEPTH, width: frame.width, height: frame.height });
       const p = py * frame.width + px;
       depth = d.alpha[p] > 0 ? d.data[p] : null;
     }
-    return { index, label, depth };
+    return { index, label, group, depth };
+  }
+
+  /**
+   * F3: per-gaussian contribution mass per mask label at the current camera
+   * (K-buffer + FlashSplat input) and the 2DGS median depth. See contrib-pass.js.
+   * @param {{mask:Uint32Array, width:number, height:number, labelCount:number, k?:number}} opts
+   */
+  renderContributions(opts) {
+    if (!this.device) return Promise.reject(new Error("WebGPU is not initialized"));
+    return this._serial(async () => {
+      if (!this._contribPass) {
+        const { ContributionPass } = await import("./contrib-pass.js");
+        this._contribPass = new ContributionPass(this);
+      }
+      return this._contribPass.run(opts);
+    });
   }
 
   /**
@@ -1555,6 +1678,28 @@ export class WebGPUSplatRenderer {
     const seen = new Set();
     for (let y = ya; y <= yb; y++) {
       for (let x = xa; x <= xb; x++) {
+        const v = frame.data[y * frame.width + x];
+        if (v) seen.add(v - 1);
+      }
+    }
+    return Uint32Array.from(seen).sort();
+  }
+
+  /**
+   * Unique gaussian indices visible inside a pixel disc (brush selection, F5).
+   * @returns {Promise<Uint32Array>} ascending indices
+   */
+  async pickDisc(cx, cy, radius) {
+    const frame = await this._idFrame();
+    const r = Math.max(0.5, radius);
+    const xa = Math.max(0, Math.floor(cx - r));
+    const ya = Math.max(0, Math.floor(cy - r));
+    const xb = Math.min(frame.width - 1, Math.ceil(cx + r));
+    const yb = Math.min(frame.height - 1, Math.ceil(cy + r));
+    const seen = new Set();
+    for (let y = ya; y <= yb; y++) {
+      for (let x = xa; x <= xb; x++) {
+        if ((x + 0.5 - cx) ** 2 + (y + 0.5 - cy) ** 2 > r * r) continue;
         const v = frame.data[y * frame.width + x];
         if (v) seen.add(v - 1);
       }

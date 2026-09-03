@@ -29,3 +29,6 @@ artifacts/**
 # Test tooling
 test-results/
 playwright-report/
+
+# In-browser ML weights (scripts/download-ml-models.sh)
+vendor/ml/

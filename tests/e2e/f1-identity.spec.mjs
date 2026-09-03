@@ -196,7 +196,7 @@ test("two spheres: id readback and pick() return each sphere's label; hide/isola
 
   // pick() outside both spheres hits nothing.
   const empty = await page.evaluate(() => window.__h.pick(0, 0));
-  expect(empty, "pick() en un píxel vacío").toEqual({ index: -1, label: 0, depth: null });
+  expect(empty, "pick() en un píxel vacío").toEqual({ index: -1, label: 0, group: 0, depth: null });
 
   // Depth at the centre of each sphere vs the analytic front-surface view depth.
   const depth = await page.evaluate(async ({ pxA, pxB }) => {

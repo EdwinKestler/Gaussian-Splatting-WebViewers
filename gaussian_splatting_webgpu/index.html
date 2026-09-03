@@ -176,6 +176,17 @@
     #sem-cards figcaption { font-size: 11px; color: var(--muted); margin-top: 4px; }
     /* Instancias (plan F1): lista de instancias, selección y controles por fila. */
     #inst-panel { margin: 12px 0 4px; padding-top: 10px; border-top: 1px solid var(--line); }
+    #grp-panel { margin: 12px 0 4px; padding-top: 10px; border-top: 1px solid var(--line); }
+    #grp-panel h2 { margin: 0 0 2px; font-size: 13px; font-weight: 650; }
+    #grp-panel button.active { border-color: var(--accent); color: var(--accent); }
+    #grp-status { min-height: 1.4em; }
+    #seg-panel { margin: 12px 0 4px; padding-top: 10px; border-top: 1px solid var(--line); }
+    #seg-panel h2 { margin: 0 0 2px; font-size: 13px; font-weight: 650; }
+    #seg-status { min-height: 1.4em; }
+    #seg-status[data-kind="ok"] { color: var(--accent); }
+    #seg-status[data-kind="err"] { color: var(--err); }
+    #grp-status[data-kind="ok"] { color: var(--accent); }
+    #grp-status[data-kind="err"] { color: var(--err); }
     #inst-panel h2 { margin: 0 0 2px; font-size: 13px; font-weight: 650; }
     #inst-panel .inst-hint { margin: 0 0 4px; color: var(--muted); font-size: 11px; }
     #inst-status { margin: 4px 0 6px; min-height: 1.4em; color: var(--accent); font-variant-numeric: tabular-nums; }
@@ -201,10 +212,31 @@
     .inst-btns { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px; }
     .inst-btns button { padding: 3px 7px; font-size: 11px; }
     .inst-btns button.active { border-color: var(--accent); color: var(--accent); }
+    .inst-row.match { border-color: var(--warn); box-shadow: 0 0 0 1px rgba(255, 180, 84, 0.4); }
+    .inst-row.dim { opacity: 0.45; }
+    .inst-meta { grid-column: 2 / -1; color: var(--muted); font-size: 11px; }
+    #inst-name-status[data-kind="ok"] { color: var(--accent); }
+    #inst-name-status[data-kind="err"] { color: var(--err); }
+    #edit-panel { margin: 12px 0 4px; padding-top: 10px; border-top: 1px solid var(--line); }
+    #edit-panel h2 { margin: 0 0 2px; font-size: 13px; font-weight: 650; }
+    #edit-panel .row { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin: 4px 0; }
+    #edit-panel .row input[type="number"] { width: 58px; }
+    #edit-panel .row input[type="text"] { flex: 1; min-width: 90px; }
+    #edit-panel select { max-width: 100%; }
+    #edit-status[data-kind="ok"] { color: var(--accent); }
+    #edit-status[data-kind="err"] { color: var(--err); }
+    #mesh-panel { margin: 12px 0 4px; padding-top: 10px; border-top: 1px solid var(--line); }
+    #mesh-panel h2 { margin: 0 0 2px; font-size: 13px; font-weight: 650; }
+    #mesh-status[data-kind="ok"] { color: var(--accent); }
+    #mesh-status[data-kind="err"] { color: var(--err); }
+    #mesh-status[data-kind="warn"] { color: var(--warn); }
+    #sel-rect { position: fixed; pointer-events: none; border: 1px dashed var(--accent); background: rgba(126, 224, 200, 0.12); display: none; z-index: 5; }
+    body.tool-rect canvas, body.tool-pincel canvas { cursor: crosshair; }
   </style>
 </head>
 <body>
   <canvas id="gpu-canvas"></canvas>
+  <div id="sel-rect"></div>
   <div id="sem-overlay"></div>
   <aside id="hud">
     <h1>WebGPU 3DGS Viewer</h1>
@@ -255,6 +287,7 @@
         <option value="1">Grayscale</option>
         <option value="2">Black &amp; white</option>
         <option value="3">Green</option>
+        <option value="4">Grupos</option>
       </select>
       <span></span>
     </label>
@@ -265,8 +298,149 @@
         <button id="syn-two-spheres" type="button">Escena sintética (2 esferas)</button>
         <button id="inst-show-all" type="button">Mostrar todo</button>
       </div>
+      <input id="inst-search" type="text" placeholder="Buscar instancia (nombre, categoría)… Intro selecciona" autocomplete="off" />
+      <div class="check"><input id="inst-semantic" type="checkbox" /> Búsqueda semántica (CLIP en el navegador)</div>
+      <div class="btns">
+        <button id="inst-name" type="button">Nombrar instancias (Grok)</button>
+        <button id="inst-embed" type="button">Embeddings CLIP</button>
+      </div>
       <div id="inst-status">Seleccionada: ninguna</div>
+      <div id="inst-name-status" class="inst-hint"></div>
       <div id="inst-list"><div class="inst-empty">Sin instancias. Carga la escena sintética o un fichero con etiquetas.</div></div>
+    </section>
+    <section id="grp-panel">
+      <h2>Grupos</h2>
+      <p class="inst-hint">Superpuntos por grafo kNN (Mahalanobis + color, sin entrenamiento). Con la vista «Grupos» activa, un clic convierte el grupo en instancia.</p>
+      <label>k <input id="grp-k" type="range" min="4" max="20" step="1" value="10" /><span class="val"></span></label>
+      <label>Umbral <input id="grp-threshold" type="range" min="0.02" max="0.9" step="0.01" value="0.3" /><span class="val"></span></label>
+      <label>σ color <input id="grp-sigma" type="range" min="0.05" max="1" step="0.01" value="0.25" /><span class="val"></span></label>
+      <div class="btns">
+        <button id="grp-compute" type="button">Calcular grupos</button>
+        <button id="grp-view" type="button">Vista Grupos</button>
+        <button id="grp-diffuse" type="button" disabled>Difundir etiquetas</button>
+      </div>
+      <div id="grp-status" class="inst-hint">Sin grupos. Calcula el grafo para colorear superpuntos.</div>
+    </section>
+    <section id="seg-panel">
+      <h2>Segmentación</h2>
+      <p class="inst-hint">Levanta máscaras 2D a las gaussianas: K-buffer (α·T por píxel) + asignación FlashSplat + asociación entre vistas por superpuntos + difusión en el grafo. Exporta <code>instancias.json</code> y <code>etiquetas.u32</code>.</p>
+      <label>Vistas <input id="seg-views" type="range" min="1" max="12" step="1" value="6" /><span class="val"></span></label>
+      <label>Sesgo fondo <input id="seg-bias" type="range" min="0" max="1" step="0.05" value="0.3" /><span class="val"></span></label>
+      <label>Fuente
+        <select id="seg-source">
+          <option value="prueba">Etiquetas actuales (prueba)</option>
+          <option value="sidecar-cajas">Sidecar: cajas de Grok</option>
+          <option value="sidecar-sam">Sidecar: SAM</option>
+          <option value="sam2">SAM 2 (navegador, transformers.js)</option>
+        </select>
+        <span></span>
+      </label>
+      <div class="btns">
+        <button id="seg-lift" type="button">Levantar máscaras</button>
+        <button id="seg-export" type="button" disabled>Exportar instancias</button>
+      </div>
+      <div id="seg-status" class="inst-hint">Sin segmentación. Elige una fuente de máscaras y pulsa «Levantar máscaras».</div>
+    </section>
+    <section id="edit-panel">
+      <h2>Edición</h2>
+      <p class="inst-hint">Selecciona gaussianas (rectángulo, pincel, esfera 3D o superpunto), conviértelas en instancia y edita cada objeto: mover, rotar, escalar, duplicar, borrar, fusionar. Todo queda en <code>ops.jsonl</code> (deshacer/rehacer) y se exporta por instancia o escena.</p>
+      <div class="row">
+        <label>Herramienta
+          <select id="edit-tool">
+            <option value="clic">Clic (instancia)</option>
+            <option value="rect">Rectángulo</option>
+            <option value="pincel">Pincel</option>
+            <option value="esfera">Esfera 3D</option>
+            <option value="grupo">Superpunto</option>
+          </select>
+          <span></span>
+        </label>
+        <label>Modo
+          <select id="edit-mode">
+            <option value="add">Añadir</option>
+            <option value="remove">Quitar</option>
+          </select>
+          <span></span>
+        </label>
+      </div>
+      <label>Pincel (px) <input id="edit-brush" type="range" min="4" max="120" step="1" value="24" /><span class="val"></span></label>
+      <label>Esfera (% escena) <input id="edit-sphere" type="range" min="1" max="50" step="1" value="10" /><span class="val"></span></label>
+      <div class="btns">
+        <button id="edit-sel-new" type="button" disabled>Nueva instancia</button>
+        <button id="edit-sel-add" type="button" disabled>Añadir a seleccionada</button>
+        <button id="edit-sel-bg" type="button" disabled>Quitar (fondo)</button>
+        <button id="edit-sel-clear" type="button" disabled>Limpiar selección</button>
+      </div>
+      <div id="edit-sel-status" class="inst-hint">Sin selección.</div>
+      <div class="row">
+        <span class="inst-hint">Mover</span>
+        <input id="edit-tx" type="number" step="0.05" value="0" title="x" />
+        <input id="edit-ty" type="number" step="0.05" value="0" title="y" />
+        <input id="edit-tz" type="number" step="0.05" value="0" title="z" />
+      </div>
+      <div class="row">
+        <span class="inst-hint">Rotar</span>
+        <select id="edit-axis"><option value="x">eje x</option><option value="y" selected>eje y</option><option value="z">eje z</option></select>
+        <input id="edit-deg" type="number" step="5" value="0" title="grados" />
+        <span class="inst-hint">Escala</span>
+        <input id="edit-scale" type="number" step="0.1" min="0.01" value="1" />
+      </div>
+      <div class="btns">
+        <button id="edit-apply" type="button">Aplicar a la seleccionada</button>
+        <button id="edit-reset" type="button">Restablecer</button>
+        <button id="edit-duplicate" type="button">Duplicar</button>
+        <button id="edit-delete" type="button">Borrar</button>
+      </div>
+      <div class="row">
+        <button id="edit-merge" type="button">Fusionar con #</button>
+        <input id="edit-merge-target" type="number" min="1" step="1" value="1" />
+        <button id="edit-rename" type="button">Renombrar</button>
+        <input id="edit-name" type="text" placeholder="nombre en español" />
+      </div>
+      <div class="btns">
+        <button id="edit-undo" type="button" disabled>Deshacer</button>
+        <button id="edit-redo" type="button" disabled>Rehacer</button>
+        <button id="edit-save-ops" type="button" disabled>Guardar ops.jsonl</button>
+      </div>
+      <div class="row">
+        <label>Exportar
+          <select id="edit-scope">
+            <option value="instancia">instancia seleccionada</option>
+            <option value="escena">escena visible</option>
+          </select>
+          <span></span>
+        </label>
+        <label>Formato
+          <select id="edit-format">
+            <option value="ply">PLY (3DGS + instance_id)</option>
+            <option value="splat">.splat (SH0)</option>
+            <option value="spz">SPZ (GaussForge)</option>
+            <option value="compressed.ply">PLY comprimido (GaussForge)</option>
+          </select>
+          <span></span>
+        </label>
+        <button id="edit-export" type="button">Exportar</button>
+      </div>
+      <div id="edit-status" class="inst-hint">Sin ediciones.</div>
+    </section>
+    <section id="mesh-panel">
+      <h2>Malla</h2>
+      <p class="inst-hint">Órbita de cámaras alrededor de la instancia aislada → profundidad + color → fusión TSDF + <em>surface nets</em> en un worker → GLB con color por vértice (<code>artifacts/mallas/</code>). Con 3DGS vainilla la superficie es ruidosa; para malla de producción usa PLY de 2DGS/GOF.</p>
+      <label>Vistas <input id="mesh-views" type="range" min="6" max="48" step="1" value="24" /><span class="val"></span></label>
+      <label>Vóxeles <input id="mesh-resolution" type="range" min="32" max="192" step="8" value="96" /><span class="val"></span></label>
+      <label>Arista (px) <input id="mesh-edge" type="range" min="96" max="512" step="32" value="256" /><span class="val"></span></label>
+      <label>Profundidad
+        <select id="mesh-depth">
+          <option value="media">media ponderada (rápida)</option>
+          <option value="mediana">mediana 2DGS (K-buffer)</option>
+        </select>
+        <span></span>
+      </label>
+      <div class="check"><input id="mesh-carve" type="checkbox" checked /> Tallar el espacio vacío (elimina restos flotantes)</div>
+      <div class="btns">
+        <button id="mesh-build" type="button">Malla de la seleccionada</button>
+      </div>
+      <div id="mesh-status" class="inst-hint">Sin malla. Selecciona una instancia y pulsa «Malla».</div>
     </section>
     <div class="btns">
       <button id="sem-analyze" type="button">Tag scene (Grok)</button>
