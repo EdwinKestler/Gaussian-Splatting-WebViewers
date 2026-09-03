@@ -25,8 +25,10 @@
       "properties": {
         "mascaras": { "type": "string", "description": "prueba | sidecar-cajas | sidecar-sam | sam2 | manual | …" },
         "levantamiento": { "type": "string" },
+        "asociacion": { "type": ["string", "null"] },
         "sesgo_fondo": { "type": ["number", "null"] },
         "umbral_iou": { "type": ["number", "null"] },
+        "umbral_gaussiana": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
         "difusion_iter": { "type": ["integer", "null"] },
         "vistas": { "type": ["integer", "null"] },
         "k_buffer": { "type": ["integer", "null"] }

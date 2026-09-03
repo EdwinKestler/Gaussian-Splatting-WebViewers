@@ -153,12 +153,75 @@ describe("associateMasks", () => {
     const v1 = new Uint32Array(n);
     for (let i = 0; i < 600; i++) v0[i] = 1; // superpoints 0..5
     for (let i = 400; i < 1000; i++) v1[i] = 1; // superpoints 4..9 → shared 4,5 (200 of 600 = 0.33)
-    const jac = associateMasks([{ labels: v0, labelCount: 2 }, { labels: v1, labelCount: 2 }], { superpoint: sp, mode: "jaccard", iouThreshold: 0.3 });
+    const jac = associateMasks([{ labels: v0, labelCount: 2 }, { labels: v1, labelCount: 2 }], {
+      superpoint: sp,
+      mode: "jaccard",
+      iouThreshold: 0.3,
+      gaussianThreshold: 1, // isolate the coarse metric for this comparison
+    });
     assert.equal(jac.globalCount, 2, "jaccard 200/1000 = 0.2 no fusiona");
     const con = associateMasks([{ labels: v0, labelCount: 2 }, { labels: v1, labelCount: 2 }], { superpoint: sp, iouThreshold: 0.3 });
     assert.equal(con.globalCount, 1, "contención 200/600 = 0.33 fusiona");
     assert.ok(Math.abs(con.pairs[0].overlap - 1 / 3) < 1e-9);
     assert.equal(containment(new Map([[1, 2]]), 2, new Map([[1, 1], [2, 5]]), 6), 0.5);
+  });
+
+  test("direct Gaussian overlap recovers partial matches below the coarse threshold", () => {
+    const n = 100;
+    const sp = new Uint32Array(n);
+    for (let i = 0; i < n; i++) sp[i] = i; // deliberately tiny superpoints
+    const a = new Uint32Array(n);
+    const b = new Uint32Array(n);
+    for (let i = 0; i < 50; i++) a[i] = 1;
+    for (let i = 40; i < 90; i++) b[i] = 1; // 10/50 = 0.2 direct containment
+    const strict = associateMasks([{ labels: a, labelCount: 2 }, { labels: b, labelCount: 2 }], {
+      superpoint: sp,
+      iouThreshold: 0.5,
+      gaussianThreshold: 0.25,
+    });
+    assert.equal(strict.globalCount, 2);
+    const recovered = associateMasks([{ labels: a, labelCount: 2 }, { labels: b, labelCount: 2 }], {
+      superpoint: sp,
+      iouThreshold: 0.5,
+      gaussianThreshold: 0.15,
+    });
+    assert.equal(recovered.globalCount, 1);
+    assert.ok(Math.abs(recovered.pairs[0].gaussianOverlap - 0.2) < 1e-9);
+    assert.equal(recovered.strategy, "reciprocal-overlap-graph");
+  });
+
+  test("association is view-order independent and never merges two masks from one view", () => {
+    const n = 120;
+    const v0 = new Uint32Array(n);
+    const v1 = new Uint32Array(n);
+    const v2 = new Uint32Array(n);
+    for (let i = 0; i < 60; i++) v0[i] = 1;
+    for (let i = 60; i < 120; i++) v0[i] = 2;
+    for (let i = 10; i < 70; i++) v1[i] = 1; // ambiguous bridge: mostly object 1
+    for (let i = 55; i < 120; i++) v2[i] = 1; // mostly object 2
+    const views = [
+      { labels: v0, labelCount: 3 },
+      { labels: v1, labelCount: 2 },
+      { labels: v2, labelCount: 2 },
+    ];
+    const forward = associateMasks(views, { gaussianThreshold: 0.15, iouThreshold: 0.95 });
+    const reverse = associateMasks([...views].reverse(), { gaussianThreshold: 0.15, iouThreshold: 0.95 });
+    assert.equal(forward.globalCount, 2);
+    assert.equal(reverse.globalCount, 2);
+    assert.notEqual(forward.globalOf[0][1], forward.globalOf[0][2]);
+    for (const members of forward.members) {
+      const seen = new Set(members.map(([view]) => view));
+      assert.equal(seen.size, members.length, "one mask per view in every component");
+    }
+    assert.deepEqual(forward.members.map((m) => m.length).sort(), reverse.members.map((m) => m.length).sort());
+  });
+
+  test("validates association thresholds and mode", () => {
+    const view = [{ labels: new Uint32Array(8).fill(1), labelCount: 2 }];
+    assert.throws(() => associateMasks(view, { gaussianThreshold: 2 }), /gaussianThreshold/);
+    assert.throws(() => associateMasks(view, { iouThreshold: -1 }), /iouThreshold/);
+    assert.throws(() => associateMasks(view, { minGaussians: 0 }), /minGaussians/);
+    assert.throws(() => associateMasks(view, { mode: "cosine" }), /association mode/);
   });
 });
 

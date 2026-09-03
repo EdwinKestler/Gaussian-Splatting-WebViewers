@@ -6,12 +6,11 @@
  *   1. Per view: closed-form FlashSplat assignment
  *        label_i = argmax_l C[i][l]  with a background bias on column 0.
  *   2. Cross-view association (Gaga-style memory, without training): every
- *      (view, mask) is described by the mass-weighted superpoint histogram of
- *      the gaussians it captured; a mask joins the instance whose accumulated
- *      histogram contains it (Σ min over the smaller total ≥ iouThreshold),
- *      otherwise it starts a new instance. Superpoints (F2) matter: two
- *      cameras 90° apart lift different gaussians of the same object, and
- *      only the shared superpoints reveal that they are one instance.
+ *      (view, mask) is described by both its mass-weighted superpoint histogram
+ *      and the exact set of lifted gaussians. Reciprocal best matches form an
+ *      order-independent graph. Components may contain at most one mask from
+ *      each view, which prevents an ambiguous mask from collapsing two objects
+ *      that are distinct in another view.
  *   3. Global assignment on the summed contributions of each global instance.
  *   4. Optional cleanup with shared/graph.js diffuseLabels (done by the caller).
  *
@@ -25,6 +24,8 @@ export const DEFAULT_LIFT_OPTIONS = Object.freeze({
   minMass: 1e-3,
   /** overlap (containment of the smaller superpoint histogram) needed to merge a mask into an instance */
   iouThreshold: 0.5,
+  /** direct lifted-gaussian containment needed when fine overlap is stronger evidence than superpoints */
+  gaussianThreshold: 0.15,
   /** ignore masks that lifted fewer gaussians than this when associating */
   minGaussians: 5,
 });
@@ -107,73 +108,172 @@ export function containment(a, totalA, b, totalB) {
   return denom > 0 ? inter / denom : 0;
 }
 
+/** Compact exact Gaussian membership used by the reciprocal association graph. */
+function maskSupport(labels, label) {
+  const bits = new Uint32Array(Math.ceil(labels.length / 32));
+  let count = 0;
+  for (let i = 0; i < labels.length; i++) {
+    if (labels[i] !== label) continue;
+    bits[i >> 5] |= (1 << (i & 31)) >>> 0;
+    count++;
+  }
+  return { bits, count };
+}
+
+function popcount32(v) {
+  v >>>= 0;
+  v -= (v >>> 1) & 0x55555555;
+  v = (v & 0x33333333) + ((v >>> 2) & 0x33333333);
+  return (((v + (v >>> 4)) & 0x0f0f0f0f) * 0x01010101) >>> 24;
+}
+
+function supportContainment(a, b) {
+  let intersection = 0;
+  for (let i = 0; i < a.bits.length; i++) intersection += popcount32(a.bits[i] & b.bits[i]);
+  const denom = Math.min(a.count, b.count);
+  return denom > 0 ? intersection / denom : 0;
+}
+
 /**
  * Associate view-local masks into global instances (Gaga-style 3D memory
- * bank, no training). Views are processed in order; every mask is described
- * by the histogram of the superpoints (or gaussians) it lifted, weighted by
- * the mask's contribution mass when `masses` is given. A mask joins the
- * existing instance whose accumulated histogram it overlaps most, when that
- * overlap (Σ min over the smaller total, i.e. containment) reaches
- * iouThreshold; otherwise it starts a new instance. Containment rather than
- * Jaccard lets a partial view of an object (one side of a chair) join the
- * instance built from the other views.
+ * bank, no training). Every mask has a coarse mass-weighted superpoint
+ * histogram and a compact bitset of its exact Gaussian support. Across
+ * each pair of views, only reciprocal best matches become graph edges. Edges
+ * are accepted from strongest to weakest, and a component is never allowed to
+ * contain two masks from the same view. This makes the result independent of
+ * view order and stops a broad/ambiguous mask from merging objects that remain
+ * distinct in another view.
+ *
+ * An edge is eligible when either coarse containment reaches `iouThreshold`
+ * or exact lifted-Gaussian containment reaches `gaussianThreshold`. The latter
+ * recovers partial real-scene matches that share too little superpoint mass at
+ * the old 0.5 threshold. `mode: "jaccard"` remains available for the coarse
+ * score; the fine score always uses containment.
  *
  * @param {Array<{labels:Uint32Array, labelCount:number, masses?:Float32Array|null}>} views
  *   per-view assignments (assignLabels output); masses[i] = lifted mass of gaussian i (optional)
- * @param {{superpoint?:Uint32Array|null, iouThreshold?:number, minGaussians?:number, mode?:"containment"|"jaccard"}} [options]
+ * @param {{superpoint?:Uint32Array|null, iouThreshold?:number, gaussianThreshold?:number,
+ *   minGaussians?:number, mode?:"containment"|"jaccard"}} [options]
  * @returns {{globalCount:number, globalOf:Uint32Array[], members:Array<Array<[number, number]>>,
- *   pairs:Array<{a:[number,number], b:number, overlap:number}>}}
+ *   pairs:Array<{a:[number,number], b:number, overlap:number, gaussianOverlap:number, superpointOverlap:number}>,
+ *   strategy:string}}
  *   globalOf[v][localLabel] = global id (0 = fondo / dropped); members[g-1] = [[view, local], ...];
  *   pairs lists every merge decision (mask a joined instance b with the given overlap)
  */
 export function associateMasks(views, options = {}) {
   const superpoint = options.superpoint || null;
   const threshold = options.iouThreshold == null ? DEFAULT_LIFT_OPTIONS.iouThreshold : options.iouThreshold;
+  const gaussianThreshold = options.gaussianThreshold == null ? DEFAULT_LIFT_OPTIONS.gaussianThreshold : options.gaussianThreshold;
   const minGaussians = options.minGaussians == null ? DEFAULT_LIFT_OPTIONS.minGaussians : options.minGaussians;
   const mode = options.mode || "containment";
-  const instances = []; // { hist: Map, total, members: [[view, local]] }
+  if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1) throw new Error(`iouThreshold must be between 0 and 1, got ${threshold}`);
+  if (!Number.isFinite(gaussianThreshold) || gaussianThreshold < 0 || gaussianThreshold > 1) {
+    throw new Error(`gaussianThreshold must be between 0 and 1, got ${gaussianThreshold}`);
+  }
+  if (!Number.isInteger(minGaussians) || minGaussians < 1) throw new Error(`minGaussians must be a positive integer, got ${minGaussians}`);
+  if (mode !== "containment" && mode !== "jaccard") throw new Error(`unknown association mode ${mode}`);
+
+  const masks = []; // { view, local, coarse, support, count, mass }
   const globalOf = views.map((v) => new Uint32Array(v.labelCount));
-  const pairs = [];
   views.forEach((view, vi) => {
     if (superpoint && superpoint.length !== view.labels.length) {
       throw new Error("superpoint length must equal the label count");
     }
     for (let l = 1; l < view.labelCount; l++) {
-      const { hist, total } = maskHistogram(view.labels, l, superpoint, view.masses || null);
-      let count = 0;
-      for (let i = 0; i < view.labels.length; i++) if (view.labels[i] === l) count++;
-      if (count < minGaussians || total <= 0) continue;
-      let best = -1;
-      let bestOverlap = 0;
-      for (let g = 0; g < instances.length; g++) {
-        const inst = instances[g];
-        const ov = mode === "jaccard" ? weightedJaccard(hist, inst.hist) : containment(hist, total, inst.hist, inst.total);
-        if (ov > bestOverlap) {
-          bestOverlap = ov;
-          best = g;
-        }
-      }
-      if (best >= 0 && bestOverlap >= threshold) {
-        const inst = instances[best];
-        for (const [k, w] of hist) inst.hist.set(k, (inst.hist.get(k) || 0) + w);
-        inst.total += total;
-        inst.members.push([vi, l]);
-        globalOf[vi][l] = best + 1;
-        pairs.push({ a: [vi, l], b: best + 1, overlap: bestOverlap });
-      } else {
-        instances.push({ hist: new Map(hist), total, members: [[vi, l]] });
-        globalOf[vi][l] = instances.length;
-      }
+      const coarse = maskHistogram(view.labels, l, superpoint, view.masses || null);
+      const support = maskSupport(view.labels, l);
+      if (support.count < minGaussians || coarse.total <= 0) continue;
+      masks.push({ view: vi, local: l, coarse, support, count: support.count, mass: coarse.total });
     }
   });
-  // renumber by accumulated mass (largest first), stable by creation order
-  const order = instances.map((inst, g) => g).sort((x, y) => instances[y].total - instances[x].total || x - y);
-  const newId = new Uint32Array(instances.length);
-  order.forEach((g, k) => (newId[g] = k + 1));
-  for (const map of globalOf) for (let l = 0; l < map.length; l++) if (map[l]) map[l] = newId[map[l] - 1];
-  for (const pr of pairs) pr.b = newId[pr.b - 1];
-  const members = order.map((g) => instances[g].members);
-  return { globalCount: instances.length, globalOf, members, pairs };
+
+  const pairScore = (a, b) => {
+    const superpointOverlap = mode === "jaccard"
+      ? weightedJaccard(a.coarse.hist, b.coarse.hist)
+      : containment(a.coarse.hist, a.coarse.total, b.coarse.hist, b.coarse.total);
+    const gaussianOverlap = supportContainment(a.support, b.support);
+    const coarseStrength = threshold > 0 ? superpointOverlap / threshold : superpointOverlap > 0 ? Infinity : 0;
+    const fineStrength = gaussianThreshold > 0 ? gaussianOverlap / gaussianThreshold : gaussianOverlap > 0 ? Infinity : 0;
+    return {
+      eligible: superpointOverlap >= threshold || gaussianOverlap >= gaussianThreshold,
+      strength: Math.max(coarseStrength, fineStrength),
+      overlap: Math.max(superpointOverlap, gaussianOverlap),
+      gaussianOverlap,
+      superpointOverlap,
+    };
+  };
+
+  // Best candidate per mask and destination view. Reciprocal matches only.
+  const best = Array.from({ length: masks.length }, () => new Map());
+  for (let a = 0; a < masks.length; a++) {
+    for (let b = a + 1; b < masks.length; b++) {
+      if (masks[a].view === masks[b].view) continue;
+      const score = pairScore(masks[a], masks[b]);
+      if (!score.eligible) continue;
+      const update = (from, to) => {
+        const dstView = masks[to].view;
+        const prev = best[from].get(dstView);
+        if (!prev || score.strength > prev.score.strength || (score.strength === prev.score.strength && to < prev.node)) {
+          best[from].set(dstView, { node: to, score });
+        }
+      };
+      update(a, b);
+      update(b, a);
+    }
+  }
+
+  const edges = [];
+  for (let a = 0; a < masks.length; a++) {
+    for (const { node: b, score } of best[a].values()) {
+      if (a >= b) continue;
+      const back = best[b].get(masks[a].view);
+      if (back && back.node === a) edges.push({ a, b, ...score });
+    }
+  }
+  edges.sort((x, y) => y.strength - x.strength || y.overlap - x.overlap || x.a - y.a || x.b - y.b);
+
+  const parent = new Int32Array(masks.length);
+  const componentViews = masks.map((m) => new Set([m.view]));
+  for (let i = 0; i < parent.length; i++) parent[i] = i;
+  const find = (x) => {
+    while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+    return x;
+  };
+  const accepted = [];
+  for (const edge of edges) {
+    let ra = find(edge.a), rb = find(edge.b);
+    if (ra === rb) continue;
+    let conflict = false;
+    for (const view of componentViews[ra]) if (componentViews[rb].has(view)) { conflict = true; break; }
+    if (conflict) continue;
+    // Deterministic union: smaller root wins.
+    if (ra > rb) [ra, rb] = [rb, ra];
+    parent[rb] = ra;
+    for (const view of componentViews[rb]) componentViews[ra].add(view);
+    accepted.push(edge);
+  }
+
+  const components = new Map();
+  masks.forEach((mask, i) => {
+    const root = find(i);
+    let comp = components.get(root);
+    if (!comp) components.set(root, (comp = { nodes: [], mass: 0, first: i }));
+    comp.nodes.push(i);
+    comp.mass += mask.mass;
+  });
+  const order = [...components.values()].sort((a, b) => b.mass - a.mass || a.first - b.first);
+  const idOfRoot = new Map();
+  order.forEach((comp, k) => idOfRoot.set(find(comp.nodes[0]), k + 1));
+  masks.forEach((mask, i) => { globalOf[mask.view][mask.local] = idOfRoot.get(find(i)); });
+  const members = order.map((comp) => comp.nodes.map((i) => [masks[i].view, masks[i].local]));
+  const pairs = accepted.map((edge) => ({
+    a: [masks[edge.b].view, masks[edge.b].local],
+    b: idOfRoot.get(find(edge.a)),
+    overlap: edge.overlap,
+    gaussianOverlap: edge.gaussianOverlap,
+    superpointOverlap: edge.superpointOverlap,
+  }));
+  return { globalCount: order.length, globalOf, members, pairs, strategy: "reciprocal-overlap-graph" };
 }
 
 /**
@@ -204,7 +304,7 @@ export function mergeContributions(views, globalOf, count, globalCount) {
  * Full lift: per-view assignment → association → global assignment.
  * @param {Array<{contrib:Float32Array, labelCount:number, names?:string[]}>} views
  * @param {{count:number, superpoint?:Uint32Array|null, backgroundBias?:number, minMass?:number,
- *   iouThreshold?:number, minGaussians?:number}} options
+ *   iouThreshold?:number, gaussianThreshold?:number, minGaussians?:number}} options
  * @returns {{labels:Uint32Array, globalCount:number, contrib:Float32Array, association:object,
  *   perView:Uint32Array[], names:string[]}}
  */
@@ -334,8 +434,10 @@ export function buildInstancesJson({ escena, fecha, fuente, metodo, labels, gaus
     metodo: {
       mascaras: metodo.mascaras || "",
       levantamiento: "flashsplat",
+      asociacion: metodo.asociacion || null,
       sesgo_fondo: metodo.sesgo_fondo,
       umbral_iou: metodo.umbral_iou,
+      umbral_gaussiana: metodo.umbral_gaussiana ?? null,
       difusion_iter: metodo.difusion_iter ?? 0,
       vistas: views.length,
       k_buffer: metodo.k_buffer ?? null,

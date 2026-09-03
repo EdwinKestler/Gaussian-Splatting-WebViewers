@@ -190,7 +190,17 @@ test("viewer: «Levantar máscaras» (fuente prueba) rebuilds the two instances 
   expect(exported.json.version).toBe(1);
   expect(exported.json.escena).toBe("synthetic-two-spheres");
   expect(exported.json.fuente.n_gaussianas).toBe(2 * SPHERE_SIZE);
-  expect(exported.json.metodo).toMatchObject({ mascaras: "prueba", levantamiento: "flashsplat", sesgo_fondo: 0.3, difusion_iter: 5, vistas: 6, k_buffer: 24 });
+  expect(exported.json.metodo).toMatchObject({
+    mascaras: "prueba",
+    levantamiento: "flashsplat",
+    asociacion: "reciprocal-overlap-graph",
+    sesgo_fondo: 0.3,
+    umbral_iou: 0.5,
+    umbral_gaussiana: 0.15,
+    difusion_iter: 5,
+    vistas: 6,
+    k_buffer: 24,
+  });
   expect(exported.json.n_instancias).toBe(2);
   expect(exported.json.instancias.map((i) => i.nombre_es).sort()).toEqual(["esfera A", "esfera B"]);
   for (const inst of exported.json.instancias) {

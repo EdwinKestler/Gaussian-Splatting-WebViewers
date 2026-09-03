@@ -1,5 +1,5 @@
 import { WebGPUSplatRenderer, MAX_INSTANCES, OUTPUT_MODE } from "./gpu-renderer.js";
-import { buildInstancesJson, labelsToBytes, liftViews } from "../shared/lift.js";
+import { DEFAULT_LIFT_OPTIONS, buildInstancesJson, labelsToBytes, liftViews } from "../shared/lift.js";
 import { applyNames, frameBounds, instanceBounds, searchInstances } from "../shared/naming.js";
 import { diffuseLabels, groupColor, indicesOfGroup, shDcToRgb } from "../shared/graph.js";
 import { labelColor } from "../shared/instances.js";
@@ -1125,6 +1125,8 @@ async function main() {
     const n = Math.max(1, Math.min(12, Number(options.views ?? segEl.views.value) || 1));
     const bias = options.backgroundBias ?? Number(segEl.bias.value);
     const iterations = options.diffusion ?? 5;
+    const iouThreshold = options.iouThreshold ?? DEFAULT_LIFT_OPTIONS.iouThreshold;
+    const gaussianThreshold = options.gaussianThreshold ?? DEFAULT_LIFT_OPTIONS.gaussianThreshold;
     seg.running = true;
     segEl.lift.disabled = true;
     freezeFrame = true;
@@ -1154,7 +1156,13 @@ async function main() {
         viewMeta.push({ indice: v, yaw: camera.yaw, pitch: camera.pitch, eye: camera.eye(), mascaras: m.labelCount - 1, chunks: c.chunks, splits: c.splits, instancias: [], sam: m.sam || null });
       }
       setSegStatus("Asignando etiquetas (FlashSplat) y asociando vistas…");
-      const lift = liftViews(views, { count: cloud.count, superpoint: groups.result.superpoint, backgroundBias: bias });
+      const lift = liftViews(views, {
+        count: cloud.count,
+        superpoint: groups.result.superpoint,
+        backgroundBias: bias,
+        iouThreshold,
+        gaussianThreshold,
+      });
       lift.association.members.forEach((list, k) => {
         for (const [vi] of list) if (!viewMeta[vi].instancias.includes(k + 1)) viewMeta[vi].instancias.push(k + 1);
       });
@@ -1173,7 +1181,23 @@ async function main() {
       });
       panel.fromLabels(labels, names);
       const ms = performance.now() - t0;
-      seg.last = { source, views: viewMeta, bias, iterations, changed, k: SEG_K, width: W, height: H, ms, globalCount: lift.globalCount, names: lift.names, merges: lift.association.pairs.length };
+      seg.last = {
+        source,
+        views: viewMeta,
+        bias,
+        iterations,
+        changed,
+        k: SEG_K,
+        width: W,
+        height: H,
+        ms,
+        globalCount: lift.globalCount,
+        names: lift.names,
+        merges: lift.association.pairs.length,
+        association: lift.association.strategy,
+        iouThreshold,
+        gaussianThreshold,
+      };
       segEl.export.disabled = false;
       setSegStatus(
         `${formatCount(lift.globalCount)} instancias · ${n} vistas · ${lift.association.pairs.length} fusiones · ` +
@@ -1220,7 +1244,15 @@ async function main() {
       escena: info.name || "escena",
       fecha: new Date().toISOString(),
       fuente: { formato: info.format || "", sh_grado: cloud ? cloud.shDegree : 0 },
-      metodo: { mascaras: l.source, sesgo_fondo: l.bias, umbral_iou: 0.5, difusion_iter: l.iterations, k_buffer: l.k },
+      metodo: {
+        mascaras: l.source,
+        sesgo_fondo: l.bias,
+        asociacion: l.association || "manual",
+        umbral_iou: l.iouThreshold ?? null,
+        umbral_gaussiana: l.gaussianThreshold ?? null,
+        difusion_iter: l.iterations,
+        k_buffer: l.k,
+      },
       labels,
       gaussians: cloud ? cloud.gaussians : null,
       names,
