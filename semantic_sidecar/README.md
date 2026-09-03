@@ -21,6 +21,10 @@ ArtiFixer is not in this process: it needs a local 80GB-class GPU and NVIDIA non
   `grok-boxes` rasteriza las cajas de Grok vision como elipses (las cajas grandes primero). `sam` carga `SAM_BACKEND=paquete.modulo:funcion` desde `.env`; la función recibe `(imagen PIL, prompts)` y devuelve `(etiquetas HxW, objetos)`. Sin backend configurado responde 500 con un mensaje claro; los pesos de SAM 3 (licencia SAM) no se vendorizan. Alternativa sin sidecar: la fuente «SAM 2 (navegador)» del visor ejecuta SAM 2.1 con transformers.js (`gaussian_splatting_webgpu/ml-browser.js`, pesos locales con `scripts/download-ml-models.sh`).
 - `POST /segmentaciones` `{escena, instancias, etiquetas_b64, ops_jsonl?, etiquetas_base_b64?}` guarda `instancias.json` y `etiquetas.u32` en `artifacts/segmentaciones/<escena>/<fecha>/`; con F5 también `ops.jsonl` y `etiquetas_base.u32` (las etiquetas sobre las que se reproduce el registro).
 
+## Mallas por instancia (F6)
+
+- `POST /mallas` `{escena, id_instancia, glb_b64, metadatos?}` guarda `artifacts/mallas/<escena>/<id_instancia>.glb` (+ `<id>.json`). La malla la calcula el visor (TSDF + surface nets en `shared/tsdf.js`); el sidecar sólo la persiste. Open3D (`ScalableTSDFVolume`, Poisson) queda como backend opcional futuro: `pip install open3d` arrastra dependencias de visualización (plotly, dash) y no se instala aquí.
+
 ## Exportaciones por objeto (F5)
 
 - `POST /exportaciones` `{escena, id_instancia|null, formato, bytes_b64, metadatos?, ops_jsonl?}` guarda `artifacts/exportaciones/<escena>/instancia-<id>.<formato>` (o `escena.<formato>`) más `<mismo nombre>.json` y `ops.jsonl`. Formatos: `ply`, `splat`, `spz`, `compressed.ply`, `ksplat`, `sog` (los bytes los produce el visor).

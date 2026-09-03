@@ -6,6 +6,7 @@ sirven el repositorio por `http://127.0.0.1:8091` y comprueban:
 | Fichero | Qué comprueba |
 | --- | --- |
 | `f1-identity.spec.mjs` + `pages/f1-harness.js`, `pages/f1-identity.html` | Aceptación F1: `selftest.html` reporta `SELFTEST_OK`; `pick()` y el búfer ID devuelven la etiqueta de cada esfera; ocultar/aislar; profundidad de una gaussiana aislada con error < 1 % (medida 0,0 %); normales; traslación por instancia; clic de ratón en el visor selecciona la instancia y el HUD lo muestra. |
+| `f6-mesh.spec.mjs` | Aceptación F6: malla TSDF + surface nets de una esfera → GLB válido, radio dentro del margen, guardado por `/mallas`, campo `malla` en la exportación; ruta de profundidad mediana. |
 | `f5-edit.spec.mjs` | Aceptación F5: selección (esfera, rectángulo) → instancias, mover/duplicar/borrar/deshacer/fusionar/renombrar, exportar instancia (PLY + `instance_id`) y escena (SPZ), recarga muestra sólo ese objeto, `ops.jsonl` reproducible. |
 | `f4-ml-browser.spec.mjs` | Opcional (`ML_E2E=1`, pesos de `scripts/download-ml-models.sh` en `vendor/ml/`): fuente «SAM 2 (navegador)» → 2 instancias de 2000 gaussianas, embeddings CLIP por instancia, búsqueda semántica por color, `embedding_clip` en la exportación. |
 | `f4-naming.spec.mjs` | Aceptación F4: nombrado por instancia con el sidecar simulado (`page.route`), búsqueda, exportación con nombres, tarjeta Imagine por instancia. |

@@ -104,6 +104,7 @@ function finishCloud(cloud, extra) {
     decoder: extra.decoder,
     decoderSource: extra.decoderSource || "",
     format: extra.format,
+    variant: cloud.variant || (cloud.meta && cloud.meta.variant) || null,
     shDegree: cloud.shDegree,
     count: reduced.count,
     gaussians: reduced.gaussians,

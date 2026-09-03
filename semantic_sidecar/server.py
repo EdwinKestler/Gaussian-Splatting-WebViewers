@@ -25,6 +25,7 @@ ENV_PATH = ROOT / ".env"
 OUTPUT_DIR = ROOT / "img_output"
 SEGMENT_DIR = ROOT / "artifacts" / "segmentaciones"
 EXPORT_DIR = ROOT / "artifacts" / "exportaciones"
+MESH_DIR = ROOT / "artifacts" / "mallas"
 EXPORT_FORMATS = {"ply", "splat", "spz", "compressed.ply", "ksplat", "sog"}
 # Optional SAM backend: "package.module:function"; function(image: PIL.Image, prompts: list[str])
 # -> (labels: list[list[int]] | array HxW (0 = fondo, k = object k), objects: list[{"id", "name", ...}])
@@ -614,6 +615,33 @@ def save_export(body: dict) -> dict:
     }
 
 
+def save_mesh(body: dict) -> dict:
+    """POST /mallas (F6): persist a per-instance GLB under artifacts/mallas/<escena>/<id_instancia>.glb."""
+    raw = base64.b64decode(body.get("glb_b64") or "")
+    if len(raw) < 20 or raw[:4] != b"glTF":
+        raise RuntimeError("glb_b64 no contiene un GLB (magic glTF)")
+    label = body.get("id_instancia")
+    if not isinstance(label, int) or label < 0:
+        raise RuntimeError("id_instancia debe ser un entero no negativo")
+    escena = slug(str(body.get("escena") or "escena"))
+    folder = MESH_DIR / escena
+    folder.mkdir(parents=True, exist_ok=True)
+    out = folder / f"{label}.glb"
+    out.write_bytes(raw)
+    meta = body.get("metadatos")
+    meta_path = None
+    if isinstance(meta, dict):
+        meta_path = folder / f"{label}.json"
+        meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return {
+        "ok": True,
+        "carpeta": str(folder.relative_to(ROOT)),
+        "malla": str(out.relative_to(ROOT)),
+        "bytes": len(raw),
+        "metadatos": str(meta_path.relative_to(ROOT)) if meta_path else None,
+    }
+
+
 def save_segmentation(body: dict) -> dict:
     """POST /segmentaciones: persist instancias.json + etiquetas.u32 under artifacts/."""
     instancias = body.get("instancias")
@@ -685,6 +713,7 @@ class Handler(BaseHTTPRequestHandler):
                     "name_backend": NAME_BACKEND,
                     "segmentaciones": str(SEGMENT_DIR),
                     "exportaciones": str(EXPORT_DIR),
+                    "mallas": str(MESH_DIR),
                 },
             )
             return
@@ -717,6 +746,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/exportaciones":
                 self._json(200, save_export(body))
+                return
+            if path == "/mallas":
+                self._json(200, save_mesh(body))
                 return
             if path == "/card":
                 img = decode_png(body.get("png_b64") or "")

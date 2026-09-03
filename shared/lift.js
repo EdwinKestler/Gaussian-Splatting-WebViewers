@@ -321,6 +321,7 @@ export function buildInstancesJson({ escena, fecha, fuente, metodo, labels, gaus
     bbox: gaussians ? { min: min.get(l), max: max.get(l) } : null,
     color: colors[l] || null,
     vistas: views.filter((v) => v.instancias && v.instancias.includes(l)).map((v) => v.indice),
+    malla: (names[l] && names[l].malla) || null,
     embedding_clip: embeddings && embeddings.vectors && embeddings.vectors[l]
       ? Array.from(embeddings.vectors[l], (v) => Math.round(v * 1e4) / 1e4)
       : null,

@@ -239,6 +239,7 @@ describe("export schema", () => {
       color: [1, 0, 0],
       vistas: [0, 1],
       embedding_clip: null,
+      malla: null,
     });
     assert.equal(json.instancias[1].nombre_es, "objeto 2");
     assert.deepEqual(json.instancias[1].vistas, [0]);
@@ -264,6 +265,12 @@ describe("export schema", () => {
     assert.deepEqual(json.instancias[0].embedding_clip, [0.1235, -0.5, 0.86], "redondeado a 1e-4 y como array JSON");
     assert.equal(json.instancias[1].embedding_clip, null, "instancia sin embedding");
     assert.equal(json.metodo.mascaras, "sam2-navegador");
+  });
+
+  test("buildInstancesJson carries the mesh path (F6)", () => {
+    const json = buildInstancesJson({ escena: "s", fecha: "f", fuente: {}, metodo: {}, labels: new Uint32Array([1, 2]), names: ["", { nombre_es: "a", malla: "artifacts/mallas/s/1.glb" }] });
+    assert.equal(json.instancias[0].malla, "artifacts/mallas/s/1.glb");
+    assert.equal(json.instancias[1].malla, null);
   });
 
   test("labelIou and matchLabels", () => {

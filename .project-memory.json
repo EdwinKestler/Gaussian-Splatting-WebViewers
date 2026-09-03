@@ -123,6 +123,16 @@
     },
     {
       "mode": "search",
+      "query": "TsdfVolume integrate extract surface nets largestComponent orbitCameras",
+      "expected_paths": ["shared/tsdf.js"]
+    },
+    {
+      "mode": "search",
+      "query": "encodeGlb glTF binary chunk accessors bufferViews",
+      "expected_paths": ["shared/glb.js"]
+    },
+    {
+      "mode": "search",
       "query": "instanceBounds frameBounds searchInstances applyNames nombre_es categoria",
       "expected_paths": ["shared/naming.js"]
     }

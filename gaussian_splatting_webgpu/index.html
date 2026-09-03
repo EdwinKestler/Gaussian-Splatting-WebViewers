@@ -225,6 +225,11 @@
     #edit-panel select { max-width: 100%; }
     #edit-status[data-kind="ok"] { color: var(--accent); }
     #edit-status[data-kind="err"] { color: var(--err); }
+    #mesh-panel { margin: 12px 0 4px; padding-top: 10px; border-top: 1px solid var(--line); }
+    #mesh-panel h2 { margin: 0 0 2px; font-size: 13px; font-weight: 650; }
+    #mesh-status[data-kind="ok"] { color: var(--accent); }
+    #mesh-status[data-kind="err"] { color: var(--err); }
+    #mesh-status[data-kind="warn"] { color: var(--warn); }
     #sel-rect { position: fixed; pointer-events: none; border: 1px dashed var(--accent); background: rgba(126, 224, 200, 0.12); display: none; z-index: 5; }
     body.tool-rect canvas, body.tool-pincel canvas { cursor: crosshair; }
   </style>
@@ -417,6 +422,25 @@
         <button id="edit-export" type="button">Exportar</button>
       </div>
       <div id="edit-status" class="inst-hint">Sin ediciones.</div>
+    </section>
+    <section id="mesh-panel">
+      <h2>Malla</h2>
+      <p class="inst-hint">Órbita de cámaras alrededor de la instancia aislada → profundidad + color → fusión TSDF + <em>surface nets</em> en un worker → GLB con color por vértice (<code>artifacts/mallas/</code>). Con 3DGS vainilla la superficie es ruidosa; para malla de producción usa PLY de 2DGS/GOF.</p>
+      <label>Vistas <input id="mesh-views" type="range" min="6" max="48" step="1" value="24" /><span class="val"></span></label>
+      <label>Vóxeles <input id="mesh-resolution" type="range" min="32" max="192" step="8" value="96" /><span class="val"></span></label>
+      <label>Arista (px) <input id="mesh-edge" type="range" min="96" max="512" step="32" value="256" /><span class="val"></span></label>
+      <label>Profundidad
+        <select id="mesh-depth">
+          <option value="media">media ponderada (rápida)</option>
+          <option value="mediana">mediana 2DGS (K-buffer)</option>
+        </select>
+        <span></span>
+      </label>
+      <div class="check"><input id="mesh-carve" type="checkbox" checked /> Tallar el espacio vacío (elimina restos flotantes)</div>
+      <div class="btns">
+        <button id="mesh-build" type="button">Malla de la seleccionada</button>
+      </div>
+      <div id="mesh-status" class="inst-hint">Sin malla. Selecciona una instancia y pulsa «Malla».</div>
     </section>
     <div class="btns">
       <button id="sem-analyze" type="button">Tag scene (Grok)</button>

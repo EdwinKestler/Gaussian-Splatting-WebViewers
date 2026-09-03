@@ -6,6 +6,8 @@ import { labelColor } from "../shared/instances.js";
 import { makeTwoSpheres } from "../shared/synthetic.js";
 import { EditLog, bakeSession, composeTransform, mat4Multiply, mat4Translation, opsFromJsonl, rangesFromIndices, replay, sessionFingerprint, transformPoint } from "../shared/edit-ops.js";
 import { encodePly, encodeSplat32, exportFileName } from "../shared/export-io.js";
+import { orbitCameras } from "../shared/tsdf.js";
+import { encodeGlb } from "../shared/glb.js";
 
 const DEMO_PLY = "./demo.ply";
 const DEFAULT_SCENE = "../splats/alarm_clock_generated.splat";
@@ -503,6 +505,7 @@ class InstancePanel {
       button("tint", "Teñir", row.tinted) +
       button("name", "Nombrar", false) +
       button("card", "Tarjeta", false) +
+      button("mesh", "Malla", false) +
       `</div>`;
     el.querySelector(".inst-name").textContent = row.name;
     const meta = el.querySelector(".inst-meta");
@@ -1209,7 +1212,7 @@ async function main() {
     const names = [];
     const colors = [];
     for (const [label, e] of panel.entries) {
-      names[label] = { nombre: e.nombre || e.name, nombre_es: e.nombre_es || e.name, categoria: e.categoria || "", confianza: Number.isFinite(e.confianza) ? e.confianza : null };
+      names[label] = { nombre: e.nombre || e.name, nombre_es: e.nombre_es || e.name, categoria: e.categoria || "", confianza: Number.isFinite(e.confianza) ? e.confianza : null, malla: e.malla || null };
       colors[label] = labelColor(label).map((v) => Math.round(v * 255));
     }
     const info = window.__gsViewer || {};
@@ -1802,6 +1805,183 @@ async function main() {
   };
   window.__gsLoad = { buffer: (buffer, name) => loadFromBuffer(buffer, name), url: (url, name) => loadUrl(url, name), synthetic: (options) => loadSynthetic(options) };
 
+  // ---------------------------------------------------------- Malla (F6)
+
+  const meshEl = { views: $("mesh-views"), resolution: $("mesh-resolution"), edge: $("mesh-edge"), depth: $("mesh-depth"), carve: $("mesh-carve"), build: $("mesh-build"), status: $("mesh-status") };
+  const meshState = { running: false, worker: null, jobId: 0, pending: null, last: null };
+
+  function setMeshStatus(text, kind = "") {
+    meshEl.status.textContent = text;
+    meshEl.status.dataset.kind = kind;
+    if (kind === "err") console.warn(`[malla] ${text}`);
+    else console.info(`[malla] ${text}`);
+  }
+
+  function meshWorker() {
+    if (!meshState.worker) {
+      meshState.worker = new Worker(new URL("../shared/tsdf-worker.js", import.meta.url), { type: "module" });
+      meshState.worker.onmessage = (e) => {
+        const msg = e.data;
+        if (!meshState.pending || msg.id !== meshState.pending.id) return;
+        const { resolve, reject } = meshState.pending;
+        meshState.pending = null;
+        if (msg.ok) resolve(msg);
+        else reject(new Error(msg.error));
+      };
+      meshState.worker.onerror = (e) => {
+        if (meshState.pending) {
+          meshState.pending.reject(new Error(e.message || "worker de malla"));
+          meshState.pending = null;
+        }
+      };
+    }
+    return meshState.worker;
+  }
+
+  /** Depth (+ alpha) of the current camera: alpha-weighted mean (fast) or the 2DGS median from the K-buffer. */
+  async function depthMap(kind, W, H) {
+    if (kind === "mediana") {
+      const c = await renderer.renderContributions({ mask: new Uint32Array(W * H), width: W, height: H, labelCount: 1, k: SEG_K });
+      return { depth: c.medianDepth, alpha: c.alpha };
+    }
+    const d = await renderer.renderOffscreen({ mode: OUTPUT_MODE.DEPTH, width: W, height: H });
+    return { depth: d.data, alpha: d.alpha };
+  }
+
+  /**
+   * Mesh one instance: isolate it, orbit `views` cameras around its bounds,
+   * fuse depth + colour into a TSDF in the worker and write a GLB.
+   */
+  async function meshInstance(label, options = {}) {
+    if (!cloud || !cloud.count) throw new Error("carga una escena antes de crear mallas");
+    if (meshState.running) throw new Error("ya hay una malla en curso");
+    const labels = renderer.getLabels();
+    const bounds = instanceBounds(labels, cloud.gaussians, label);
+    if (!bounds) throw new Error(`la instancia ${label} no tiene gaussianas`);
+    const views = Math.max(4, Math.min(64, Number(options.views ?? meshEl.views.value) || 24));
+    const resolution = Math.max(16, Math.min(256, Number(options.resolution ?? meshEl.resolution.value) || 96));
+    const edge = Math.max(64, Math.min(1024, Number(options.edge ?? meshEl.edge.value) || 256));
+    const depthKind = options.depth || meshEl.depth.value;
+    const carve = options.carve ?? meshEl.carve.checked;
+    const download = options.download ?? true;
+    const save = options.save ?? true;
+    meshState.running = true;
+    meshEl.build.disabled = true;
+    freezeFrame = true;
+    const saved = { target: camera.target.slice(), radius: camera.radius, yaw: camera.yaw, pitch: camera.pitch, isolate: renderer.params.isolateLabel };
+    const t0 = performance.now();
+    try {
+      clearSelection(true);
+      // Instance centre/radius in world space after its F5 transform.
+      const xf = renderer.getInstance(label).xform;
+      const center = transformPoint(xf, bounds.center);
+      const scaleMax = Math.max(Math.hypot(xf[0], xf[1], xf[2]), Math.hypot(xf[4], xf[5], xf[6]), Math.hypot(xf[8], xf[9], xf[10]));
+      const radius = bounds.radius * scaleMax;
+      const frame = frameBounds({ center, radius }, camera.fov, 1.5);
+      const W = edge;
+      const H = Math.max(64, Math.round((edge * canvas.height) / Math.max(canvas.width, 1)));
+      const cams = orbitCameras({ center, distance: frame.radius, count: views, fov: camera.fov, width: W, height: H, aspect: canvas.width / canvas.height });
+      renderer.setParams({ isolateLabel: label });
+      const captured = [];
+      let msRender = 0;
+      for (let v = 0; v < cams.length; v++) {
+        const cam = cams[v];
+        camera.target = center.slice();
+        camera.radius = frame.radius;
+        camera.yaw = cam.yaw;
+        camera.pitch = cam.pitch;
+        camera.dampYaw = camera.dampPitch = camera.dampPanX = camera.dampPanY = camera.dampZoom = 0;
+        pushCamera();
+        setMeshStatus(`Malla de ${label}: vista ${v + 1}/${cams.length} (${W}×${H}, profundidad ${depthKind})…`);
+        const tv = performance.now();
+        const { depth, alpha } = await depthMap(depthKind, W, H);
+        const col = await renderer.renderOffscreen({ mode: OUTPUT_MODE.COLOR, width: W, height: H, clearColor: [0, 0, 0, 0] });
+        msRender += performance.now() - tv;
+        // The renderer's view matrix is the one actually used; take it from the last frame.
+        captured.push({ depth, alpha, color: col.data, width: W, height: H, view: Float32Array.from(lastFrame.view), fx: cam.fx, fy: cam.fy, cx: cam.cx, cy: cam.cy });
+      }
+      setMeshStatus(`Malla de ${label}: fusionando ${cams.length} vistas en ${resolution}³ vóxeles…`);
+      const id = ++meshState.jobId;
+      const fused = await new Promise((resolve, reject) => {
+        meshState.pending = { id, resolve, reject };
+        meshWorker().postMessage(
+          { id, views: captured, center, radius, resolution, carve, alphaMin: 0.05 },
+          captured.flatMap((c) => [c.depth.buffer, c.alpha.buffer, c.color.buffer])
+        );
+      });
+      const mesh = fused.mesh;
+      if (!mesh.vertexCount) throw new Error("la fusión no produjo superficie (¿instancia demasiado pequeña o vistas vacías?)");
+      const escena = (window.__gsViewer && window.__gsViewer.name) || "escena";
+      const e = panel.entries.get(label) || {};
+      const metadatos = {
+        version: 1,
+        escena,
+        fecha: new Date().toISOString(),
+        id_instancia: label,
+        nombre_es: e.nombre_es || e.name || `instancia ${label}`,
+        metodo: { profundidad: depthKind, vistas: cams.length, arista: [W, H], voxeles: resolution, voxel: fused.stats.voxelSize, truncamiento: fused.stats.truncation, tallado: carve, extraccion: "surface-nets", componentes: fused.stats.components, triangulos_descartados: fused.stats.removedTriangles },
+        malla: { vertices: fused.stats.vertices, triangulos: fused.stats.triangles, bbox: fused.stats.bbox, euler: fused.stats.euler },
+        aviso: window.__gsViewer && window.__gsViewer.variant === "2dgs" ? null : "3DGS vainilla: superficie ruidosa; usa PLY de 2DGS/GOF para malla de producción",
+        tiempos_ms: { render: Math.round(msRender), fusion: Math.round(fused.msFuse), extraccion: Math.round(fused.ms - fused.msFuse) },
+      };
+      const glb = encodeGlb(mesh, { name: `${escena} instancia ${label}`, extras: { id_instancia: label, nombre_es: metadatos.nombre_es, escena } });
+      const name = `${exportFileName(escena, label, "glb")}`;
+      if (download) downloadBlob(new Blob([glb], { type: "model/gltf-binary" }), name);
+      let savedTo = null;
+      if (save) {
+        try {
+          const res = await fetch(`${SIDECAR_URL}/mallas`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ escena, id_instancia: label, glb_b64: await blobToB64(new Blob([glb])), metadatos }),
+          });
+          const data = await res.json();
+          if (res.ok && data.ok) savedTo = data;
+          else console.info("[malla] el sidecar no guardó la malla:", data.error || res.status);
+        } catch (err) {
+          console.info("[malla] sidecar no disponible para guardar en artifacts/:", err.message);
+        }
+      }
+      if (savedTo && e) e.malla = savedTo.malla;
+      const ms = performance.now() - t0;
+      meshState.last = { label, name, stats: fused.stats, metadatos, saved: savedTo, ms, bytes: glb.byteLength };
+      setMeshStatus(
+        `${name}: ${formatCount(fused.stats.vertices)} vértices · ${formatCount(fused.stats.triangles)} triángulos · ${(glb.byteLength / 1e6).toFixed(2)} MB · render ${Math.round(msRender)} ms · fusión ${Math.round(fused.ms)} ms` +
+          (savedTo ? ` · guardado en ${savedTo.malla}` : " · descarga local") +
+          (metadatos.aviso ? ` · aviso: ${metadatos.aviso}` : ""),
+        metadatos.aviso ? "warn" : "ok"
+      );
+      return { name, label, stats: fused.stats, metadatos, saved: savedTo, ms, bytes: glb.byteLength, glb: download ? null : glb, mesh: options.returnMesh ? mesh : null };
+    } catch (err) {
+      setMeshStatus(`Malla fallida: ${err.message}`, "err");
+      throw err;
+    } finally {
+      renderer.setParams({ isolateLabel: saved.isolate });
+      camera.target = saved.target;
+      camera.radius = saved.radius;
+      camera.yaw = saved.yaw;
+      camera.pitch = saved.pitch;
+      camera.dampYaw = camera.dampPitch = camera.dampPanX = camera.dampPanY = camera.dampZoom = 0;
+      pushCamera();
+      freezeFrame = false;
+      meshState.running = false;
+      meshEl.build.disabled = false;
+    }
+  }
+
+  meshEl.build.addEventListener("click", () => {
+    const l = panel.selection ? panel.selection.label : 0;
+    if (!l) { setMeshStatus("selecciona una instancia", "err"); return; }
+    meshInstance(l).catch(() => {});
+  });
+
+  window.__gsMesh = {
+    build: (label, options) => meshInstance(label, options),
+    get last() {
+      return meshState.last;
+    },
+  };
+
   // ---------------------------------------------------------- Nombrar (F4)
 
   const nameEl = { button: $("inst-name"), status: $("inst-name-status"), search: $("inst-search") };
@@ -1983,6 +2163,7 @@ async function main() {
   panel.onAction = (act, label) => {
     if (act === "name") nameInstances({ labels: [label] }).catch(() => {});
     else if (act === "card") cardForInstance(label).catch(() => {});
+    else if (act === "mesh") meshInstance(label).catch(() => {});
   };
   nameEl.button.addEventListener("click", () => nameInstances().catch(() => {}));
   nameEl.search.addEventListener("input", () => panel.search(nameEl.search.value));
@@ -2086,6 +2267,7 @@ async function main() {
       shDegree: degree,
       count: result.count,
       compact,
+      variant: result.variant || null,
       labelSource: result.labelSource || null,
       restoredInstances: restored,
     };
