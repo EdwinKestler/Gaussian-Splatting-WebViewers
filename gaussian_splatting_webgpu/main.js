@@ -1240,8 +1240,22 @@ async function main() {
   }
 
   /** Download instancias.json + etiquetas.u32 and, when the sidecar answers, save them under artifacts/. */
+  /** Validate instancias.json against shared/schemas/instancias.schema.json (plan §3.3); problems are logged, never fatal. */
+  async function validateInstancesJson(json) {
+    try {
+      const { loadSchema, validateAgainst } = await import("../shared/schemas.js");
+      const errors = validateAgainst(await loadSchema("instancias"), json);
+      if (errors.length) console.warn(`[segmentación] instancias.json no cumple el esquema:\n  ${errors.join("\n  ")}`);
+      return errors;
+    } catch (err) {
+      console.warn("[segmentación] no se pudo validar el esquema:", err.message);
+      return null;
+    }
+  }
+
   async function exportSegmentation({ download = true, save = true } = {}) {
     const { json, bytes } = buildSegmentationExport();
+    const schemaErrors = await validateInstancesJson(json);
     if (download) {
       downloadBlob(new Blob([JSON.stringify(json, null, 2)], { type: "application/json" }), "instancias.json");
       downloadBlob(new Blob([bytes], { type: "application/octet-stream" }), "etiquetas.u32");
@@ -1262,10 +1276,11 @@ async function main() {
     }
     setSegStatus(
       `Exportadas ${json.n_instancias} instancias (${formatCount(json.fuente.n_gaussianas)} etiquetas)` +
-        (saved ? ` · guardado en ${saved.carpeta}` : " · descarga local (sidecar no disponible)"),
-      "ok"
+        (saved ? ` · guardado en ${saved.carpeta}` : " · descarga local (sidecar no disponible)") +
+        (schemaErrors && schemaErrors.length ? ` · ${schemaErrors.length} avisos de esquema (consola)` : " · esquema válido"),
+      schemaErrors && schemaErrors.length ? "err" : "ok"
     );
-    return { json, saved };
+    return { json, saved, schemaErrors };
   }
 
   segEl.lift.addEventListener("click", () => liftMasks().catch(() => {}));

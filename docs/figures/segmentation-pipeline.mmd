@@ -1,0 +1,18 @@
+flowchart TD
+  A["Scene file<br/>PLY (3DGS / 2DGS) · SPLAT · SPZ · KSPLAT · SOG"] --> B["F0 Decode<br/>GaussForge WASM (vendored) · splat-io.js fallback"]
+  B --> D["F1 WebGPU rasterizer<br/>EWA + SH0–3 · GPU sort · label buffer · instance table<br/>colour / depth / normal / ID readback · pick()"]
+  B --> C["F2 Superpoint graph (worker)<br/>kNN · Mahalanobis × colour · components · diffusion"]
+  D --> E["F3 K-buffer pass<br/>α·T mass per mask label · 2DGS median depth"]
+  M["2D masks per view<br/>SAM 2.1 in the browser (transformers.js)<br/>sidecar /segment (Grok boxes · SAM backend)<br/>current labels (test)"] --> E
+  E --> G["F3 Lift<br/>FlashSplat argmax · Gaga-style association over superpoints · graph diffusion"]
+  C --> G
+  G --> J[("etiquetas.u32 + instancias.json<br/>artifacts/segmentaciones/")]
+  J --> D
+  J --> K["F4 Name<br/>isolated render → sidecar /name (Grok VQA)<br/>CLIP ViT-B/32 embeddings · semantic search"]
+  K --> J
+  J --> L["F5 Edit<br/>rect · brush · sphere · superpoint selection<br/>move / rotate / scale · duplicate · delete · merge · rename<br/>ops.jsonl replay · undo / redo"]
+  L --> X[("Export<br/>PLY + instance_id · .splat · SPZ (GaussForge)<br/>artifacts/exportaciones/")]
+  J --> N["F6 Mesh (worker)<br/>orbit cameras → depth + colour → TSDF + carving → surface nets"]
+  N --> Y[("GLB with vertex colours<br/>artifacts/mallas/")]
+  classDef store fill:#eef7f4,stroke:#2f8f7a,color:#123;
+  class J,X,Y store;

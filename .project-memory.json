@@ -22,6 +22,7 @@
     "gaussian_splatting_webgpu/**/*.js",
     "gaussian_splatting_webgpu/**/*.sh",
     "shared/**/*.js",
+    "shared/**/*.json",
     "splat_converter/**/*.html",
     "splat_converter/**/*.js",
     "semantic_sidecar/**/*.md",
@@ -130,6 +131,11 @@
       "mode": "search",
       "query": "encodeGlb glTF binary chunk accessors bufferViews",
       "expected_paths": ["shared/glb.js"]
+    },
+    {
+      "mode": "search",
+      "query": "validateAgainst loadSchema assertValid instancias.schema.json",
+      "expected_paths": ["shared/schemas.js"]
     },
     {
       "mode": "search",
