@@ -159,7 +159,7 @@ flowchart TD
   J --> D
   J --> K["Clasificación por instancia<br/>render aislado → Grok / CLIP"]
   J --> L["Edición<br/>seleccionar · aislar · borrar · mover · duplicar · exportar"]
-  J --> M["Malla por instancia<br/>profundidad+color → TSDF → GLB / 3MF validado"]
+  J --> M["Malla por instancia o escena visible<br/>profundidad+color → TSDF → GLB / 3MF validado"]
   K --> J
 ```
 
@@ -238,10 +238,11 @@ flowchart TD
 - Fuera de alcance en v1: relleno de agujeros tras borrar (GPGS, GaussianEditor requieren
   difusión 2D y reoptimización; se deja como etapa *offline* opcional).
 
-#### F. Malla por instancia (`semantic_sidecar/mesh.py` y `shared/tsdf.js` más adelante)
+#### F. Malla por instancia o escena visible (`shared/tsdf.js` y worker)
 
-- Órbita de 24–48 cámaras alrededor de la instancia aislada → profundidad mediana +
-  normal + RGB + cámara.
+- Órbita de 24–48 cámaras alrededor de la instancia aislada o de los límites de toda la
+  escena visible → profundidad mediana + normal + RGB + cámara. En el segundo caso se
+  conservan todos los componentes desconectados visibles.
 - Fusión TSDF (Open3D `ScalableTSDFVolume`, receta 2DGS) → *marching cubes* → limpieza
   (componente mayor, decimación) → GLB con color por vértice. Vía rápida: Poisson sobre
   medias con normales de la covarianza para objetos pequeños.

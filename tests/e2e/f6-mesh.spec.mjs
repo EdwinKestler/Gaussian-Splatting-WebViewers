@@ -1,6 +1,6 @@
 /**
  * F6 acceptance (plan §4 "F6 Malla", milestone H4): "Malla" on an instance
- * produces a GLB or print-scaled 3MF. Sphere A of the synthetic scene is orbited (depth + colour),
+ * or the complete visible scene produces a GLB or print-scaled 3MF. Sphere A of the synthetic scene is orbited (depth + colour),
  * fused into a TSDF in the worker and extracted with surface nets; the mesh is
  * a closed surface whose mean radius matches the sphere within the documented
  * margin, the GLB is a valid glTF 2.0 container, the sidecar (mocked) receives
@@ -32,8 +32,11 @@ test("Malla: sphere A → GLB with the right radius, saved through /mallas and r
     if (url.pathname !== "/mallas") return route.fulfill({ status: 404, headers: CORS, body: "{}" });
     const body = req.postDataJSON();
     const glb = Buffer.from(body.glb_b64, "base64");
-    calls.push({ escena: body.escena, id_instancia: body.id_instancia, magic: glb.subarray(0, 4).toString("ascii"), bytes: glb.length, metadatos: body.metadatos });
-    return route.fulfill({ status: 200, headers: { ...CORS, "Content-Type": "application/json" }, body: JSON.stringify({ ok: true, carpeta: `artifacts/mallas/${body.escena}`, malla: `artifacts/mallas/${body.escena}/${body.id_instancia}.glb`, bytes: glb.length, metadatos: null }) });
+    const jsonLength = glb.readUInt32LE(12);
+    const extras = JSON.parse(glb.subarray(20, 20 + jsonLength).toString("utf8").trim()).extras;
+    calls.push({ escena: body.escena, ambito: body.ambito, id_instancia: body.id_instancia, magic: glb.subarray(0, 4).toString("ascii"), bytes: glb.length, metadatos: body.metadatos, extras });
+    const stem = body.id_instancia == null ? "escena" : body.id_instancia;
+    return route.fulfill({ status: 200, headers: { ...CORS, "Content-Type": "application/json" }, body: JSON.stringify({ ok: true, carpeta: `artifacts/mallas/${body.escena}`, malla: `artifacts/mallas/${body.escena}/${stem}.glb`, bytes: glb.length, metadatos: null }) });
   });
   await page.goto(VIEWER_PAGE);
   await page.waitForFunction(() => window.__gsViewer?.name === "synthetic-two-spheres" && !!window.__gsMesh, null, { timeout: 60_000 });
@@ -76,8 +79,51 @@ test("Malla: sphere A → GLB with the right radius, saved through /mallas and r
   expect(r.restored.target, "la cámara vuelve a su objetivo").toEqual([0, 0, 0]);
   expect(calls).toHaveLength(1);
   expect(calls[0].magic).toBe("glTF");
+  expect(calls[0].ambito).toBe("instancia");
   expect(calls[0].id_instancia).toBe(1);
   expect(calls[0].metadatos.malla.vertices).toBe(r.stats.vertices);
+
+  await page.selectOption("#mesh-scope", "escena");
+  await expect(page.locator("#mesh-build")).toHaveText("Crear GLB de la escena");
+  await page.evaluate(() => {
+    document.getElementById("mesh-views").value = "8";
+    document.getElementById("mesh-resolution").value = "40";
+    document.getElementById("mesh-edge").value = "128";
+    document.getElementById("mesh-build").click();
+  });
+  await page.waitForFunction(() => window.__gsMesh.last?.scope === "escena", null, { timeout: 60_000 });
+  const scene = await page.evaluate(() => {
+    const result = window.__gsMesh.last;
+    return {
+      name: result.name,
+      scope: result.scope,
+      label: result.label,
+      stats: result.stats,
+      metadata: result.metadatos,
+      saved: result.saved,
+      status: document.getElementById("mesh-status").textContent,
+      restored: { isolate: window.__gsRenderer.params.isolateLabel, target: window.__gsCamera.target.map((v) => +v.toFixed(3)) },
+    };
+  });
+  console.log(`[f6-scene] ${JSON.stringify({ ...scene, stats: { ...scene.stats, validationBeforeRepair: undefined, validation: undefined, repair: undefined } })}`);
+  expect(scene.name).toBe("synthetic-two-spheres_escena.glb");
+  expect(scene.scope).toBe("escena");
+  expect(scene.label).toBeNull();
+  expect(scene.metadata.ambito).toBe("escena");
+  expect(scene.metadata.id_instancia).toBeNull();
+  expect(scene.stats.components).toBeGreaterThanOrEqual(2);
+  expect(scene.stats.bbox.min[0]).toBeLessThan(-1.4);
+  expect(scene.stats.bbox.max[0]).toBeGreaterThan(1.4);
+  expect(Math.abs(scene.stats.centroid[0])).toBeLessThan(0.05);
+  expect(scene.saved.malla).toBe("artifacts/mallas/synthetic-two-spheres/escena.glb");
+  expect(scene.status).toMatch(/^synthetic-two-spheres_escena\.glb: .* guardado en artifacts\/mallas/);
+  expect(scene.restored.isolate).toBe(0);
+  expect(scene.restored.target).toEqual([0, 0, 0]);
+  expect(calls).toHaveLength(2);
+  expect(calls[1].ambito).toBe("escena");
+  expect(calls[1].id_instancia).toBeNull();
+  expect(calls[1].extras.ambito).toBe("escena");
+  expect(calls[1].extras.id_instancia).toBeNull();
 });
 
 test("Malla: print path repairs topology and writes a millimetre-scale 3MF package", async ({ page }) => {
@@ -87,8 +133,9 @@ test("Malla: print path repairs topology and writes a millimetre-scale 3MF packa
     if (req.method() === "OPTIONS") return route.fulfill({ status: 204, headers: CORS });
     const body = req.postDataJSON();
     const file = Buffer.from(body.archivo_b64, "base64");
-    calls.push({ formato: body.formato, magic: file.subarray(0, 4).toString("hex"), bytes: file.length, metadata: body.metadatos });
-    return route.fulfill({ status: 200, headers: { ...CORS, "Content-Type": "application/json" }, body: JSON.stringify({ ok: true, carpeta: `artifacts/mallas/${body.escena}`, malla: `artifacts/mallas/${body.escena}/${body.id_instancia}.3mf`, bytes: file.length, metadatos: null }) });
+    calls.push({ ambito: body.ambito, id_instancia: body.id_instancia, formato: body.formato, magic: file.subarray(0, 4).toString("hex"), bytes: file.length, metadata: body.metadatos });
+    const stem = body.id_instancia == null ? "escena" : body.id_instancia;
+    return route.fulfill({ status: 200, headers: { ...CORS, "Content-Type": "application/json" }, body: JSON.stringify({ ok: true, carpeta: `artifacts/mallas/${body.escena}`, malla: `artifacts/mallas/${body.escena}/${stem}.3mf`, bytes: file.length, metadatos: null }) });
   });
   await page.goto(VIEWER_PAGE);
   await page.waitForFunction(() => window.__gsViewer?.name === "synthetic-two-spheres" && !!window.__gsMesh, null, { timeout: 60_000 });
@@ -140,6 +187,36 @@ test("Malla: print path repairs topology and writes a millimetre-scale 3MF packa
   expect(calls[0].formato).toBe("3mf");
   expect(calls[0].magic).toBe("504b0304");
   expect(calls[0].metadata.impresion.unidad).toBe("millimeter");
+
+  const scene = await page.evaluate(async () => {
+    const result = await window.__gsMesh.buildScene({ views: 8, resolution: 40, edge: 128, format: "3mf", maxDimensionMm: 80, download: false, save: true, returnMesh: true });
+    const { read3mfFiles } = await import("/shared/three-mf.js");
+    const files = read3mfFiles(result.threeMf);
+    const model = new TextDecoder().decode(files.get("3D/3dmodel.model"));
+    return {
+      name: result.name,
+      scope: result.scope,
+      label: result.label,
+      components: result.stats.components,
+      printable: result.metadatos.impresion.validacion.printable,
+      maxDimension: Math.max(...result.metadatos.impresion.bbox_mm.size),
+      saved: result.saved,
+      unitMm: /<model unit="millimeter"/.test(model),
+    };
+  });
+  console.log(`[f6-scene-3mf] ${JSON.stringify(scene)}`);
+  expect(scene.name).toBe("synthetic-two-spheres_escena.3mf");
+  expect(scene.scope).toBe("escena");
+  expect(scene.label).toBeNull();
+  expect(scene.components).toBeGreaterThanOrEqual(2);
+  expect(scene.printable).toBe(true);
+  expect(scene.maxDimension).toBeCloseTo(80, 3);
+  expect(scene.unitMm).toBe(true);
+  expect(scene.saved.malla).toBe("artifacts/mallas/synthetic-two-spheres/escena.3mf");
+  expect(calls).toHaveLength(2);
+  expect(calls[1].ambito).toBe("escena");
+  expect(calls[1].id_instancia).toBeNull();
+  expect(calls[1].magic).toBe("504b0304");
 });
 
 test("Malla: mesh colour follows the instance colour and the median-depth path also works", async ({ page }) => {

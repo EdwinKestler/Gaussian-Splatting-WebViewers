@@ -616,7 +616,7 @@ def save_export(body: dict) -> dict:
 
 
 def save_mesh(body: dict) -> dict:
-    """POST /mallas (F6): persist a per-instance GLB or 3MF under artifacts/mallas/<escena>/."""
+    """POST /mallas (F6): persist an instance or complete-scene GLB/3MF."""
     formato = str(body.get("formato") or "glb").lower()
     if formato not in {"glb", "3mf"}:
         raise RuntimeError("formato de malla no admitido (usa glb o 3mf)")
@@ -626,18 +626,22 @@ def save_mesh(body: dict) -> dict:
         raise RuntimeError("archivo_b64 no contiene un GLB (magic glTF)")
     if formato == "3mf" and (len(raw) < 22 or raw[:4] != b"PK\x03\x04"):
         raise RuntimeError("archivo_b64 no contiene un paquete 3MF/ZIP")
+    meta = body.get("metadatos")
+    ambito = str(body.get("ambito") or (meta.get("ambito") if isinstance(meta, dict) else "") or "instancia").lower()
+    if ambito not in {"instancia", "escena"}:
+        raise RuntimeError("ambito de malla no admitido (usa instancia o escena)")
     label = body.get("id_instancia")
-    if not isinstance(label, int) or label < 0:
+    if ambito == "instancia" and (not isinstance(label, int) or label < 0):
         raise RuntimeError("id_instancia debe ser un entero no negativo")
+    stem = "escena" if ambito == "escena" else str(label)
     escena = slug(str(body.get("escena") or "escena"))
     folder = MESH_DIR / escena
     folder.mkdir(parents=True, exist_ok=True)
-    out = folder / f"{label}.{formato}"
+    out = folder / f"{stem}.{formato}"
     out.write_bytes(raw)
-    meta = body.get("metadatos")
     meta_path = None
     if isinstance(meta, dict):
-        meta_path = folder / f"{label}.json"
+        meta_path = folder / f"{stem}.json"
         meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return {
         "ok": True,

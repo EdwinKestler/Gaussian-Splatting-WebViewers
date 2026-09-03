@@ -1858,7 +1858,7 @@ async function main() {
 
   const meshEl = {
     views: $("mesh-views"), resolution: $("mesh-resolution"), edge: $("mesh-edge"), depth: $("mesh-depth"),
-    format: $("mesh-format"), size: $("mesh-size"), carve: $("mesh-carve"), repair: $("mesh-repair"),
+    scope: $("mesh-scope"), format: $("mesh-format"), size: $("mesh-size"), carve: $("mesh-carve"), repair: $("mesh-repair"),
     build: $("mesh-build"), status: $("mesh-status"),
   };
   const meshState = { running: false, worker: null, jobId: 0, pending: null, last: null };
@@ -1872,13 +1872,42 @@ async function main() {
 
   function syncMeshFormatControls() {
     const printing = meshEl.format.value === "3mf";
+    const wholeScene = meshEl.scope.value === "escena";
+    meshEl.scope.disabled = meshState.running;
+    meshEl.format.disabled = meshState.running;
     meshEl.size.disabled = !printing || meshState.running;
     meshEl.size.title = printing ? "Longitud máxima del archivo 3MF en milímetros" : "Sólo se aplica al formato 3MF";
-    meshEl.build.textContent = printing ? "Crear 3MF de la seleccionada" : "Crear GLB de la seleccionada";
+    meshEl.build.textContent = `Crear ${printing ? "3MF" : "GLB"} de ${wholeScene ? "la escena" : "la seleccionada"}`;
   }
 
+  meshEl.scope.addEventListener("change", syncMeshFormatControls);
   meshEl.format.addEventListener("change", syncMeshFormatControls);
   syncMeshFormatControls();
+
+  /** Bounds of every currently visible Gaussian after its instance transform. */
+  function visibleSceneBounds(labels) {
+    if (cloud.gaussians.length !== labels.length * 12) throw new Error("la escena no tiene 12 valores por gaussiana");
+    const min = [Infinity, Infinity, Infinity];
+    const max = [-Infinity, -Infinity, -Infinity];
+    const states = new Map();
+    let count = 0;
+    for (let i = 0; i < labels.length; i++) {
+      const label = labels[i];
+      if (label >= MAX_INSTANCES) continue;
+      let state = states.get(label);
+      if (!state) { state = renderer.getInstance(label); states.set(label, state); }
+      if (!state.visible) continue;
+      const o = i * 12;
+      const p = transformPoint(state.xform, [cloud.gaussians[o], cloud.gaussians[o + 1], cloud.gaussians[o + 2]]);
+      if (!p.every(Number.isFinite)) continue;
+      for (let a = 0; a < 3; a++) { min[a] = Math.min(min[a], p[a]); max[a] = Math.max(max[a], p[a]); }
+      count++;
+    }
+    if (!count) return null;
+    const center = [0, 1, 2].map((a) => 0.5 * (min[a] + max[a]));
+    const radius = Math.max(1e-3, 0.5 * Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]));
+    return { min, max, center, radius, count };
+  }
 
   function meshWorker() {
     if (!meshState.worker) {
@@ -1912,16 +1941,24 @@ async function main() {
   }
 
   /**
-   * Mesh one instance: isolate it, orbit `views` cameras around its bounds,
+   * Mesh one instance or the complete visible scene: frame the target, orbit
+   * `views` cameras around its bounds,
    * fuse depth + colour into a TSDF in the worker, validate/repair the mesh,
    * and write a GLB or a millimetre-scale 3MF package.
    */
   async function meshInstance(label, options = {}) {
     if (!cloud || !cloud.count) throw new Error("carga una escena antes de crear mallas");
     if (meshState.running) throw new Error("ya hay una malla en curso");
+    const scope = String(options.scope ?? (label == null ? meshEl.scope.value : "instancia")).toLowerCase();
+    if (!["instancia", "escena"].includes(scope)) throw new Error(`objetivo de malla no admitido: ${scope}`);
+    const wholeScene = scope === "escena";
+    if (!wholeScene && (!Number.isInteger(label) || label <= 0)) throw new Error("selecciona una instancia");
+    clearSelection(true);
     const labels = renderer.getLabels();
-    const bounds = instanceBounds(labels, cloud.gaussians, label);
-    if (!bounds) throw new Error(`la instancia ${label} no tiene gaussianas`);
+    const bounds = wholeScene ? visibleSceneBounds(labels) : instanceBounds(labels, cloud.gaussians, label);
+    if (!bounds) throw new Error(wholeScene ? "la escena visible no tiene gaussianas" : `la instancia ${label} no tiene gaussianas`);
+    const targetText = wholeScene ? "la escena" : `la instancia ${label}`;
+    const targetName = wholeScene ? "escena completa" : `instancia ${label}`;
     const views = Math.max(4, Math.min(64, Number(options.views ?? meshEl.views.value) || 24));
     const resolution = Math.max(16, Math.min(256, Number(options.resolution ?? meshEl.resolution.value) || 96));
     const edge = Math.max(64, Math.min(1024, Number(options.edge ?? meshEl.edge.value) || 256));
@@ -1940,17 +1977,17 @@ async function main() {
     const saved = { target: camera.target.slice(), radius: camera.radius, yaw: camera.yaw, pitch: camera.pitch, isolate: renderer.params.isolateLabel };
     const t0 = performance.now();
     try {
-      clearSelection(true);
-      // Instance centre/radius in world space after its F5 transform.
-      const xf = renderer.getInstance(label).xform;
-      const center = transformPoint(xf, bounds.center);
-      const scaleMax = Math.max(Math.hypot(xf[0], xf[1], xf[2]), Math.hypot(xf[4], xf[5], xf[6]), Math.hypot(xf[8], xf[9], xf[10]));
+      // Instance bounds need its F5 transform; complete-scene bounds already
+      // include every visible label's transform.
+      const xf = wholeScene ? null : renderer.getInstance(label).xform;
+      const center = wholeScene ? bounds.center : transformPoint(xf, bounds.center);
+      const scaleMax = wholeScene ? 1 : Math.max(Math.hypot(xf[0], xf[1], xf[2]), Math.hypot(xf[4], xf[5], xf[6]), Math.hypot(xf[8], xf[9], xf[10]));
       const radius = bounds.radius * scaleMax;
       const frame = frameBounds({ center, radius }, camera.fov, 1.5);
       const W = edge;
       const H = Math.max(64, Math.round((edge * canvas.height) / Math.max(canvas.width, 1)));
       const cams = orbitCameras({ center, distance: frame.radius, count: views, fov: camera.fov, width: W, height: H, aspect: canvas.width / canvas.height });
-      renderer.setParams({ isolateLabel: label });
+      renderer.setParams({ isolateLabel: wholeScene ? 0 : label });
       const captured = [];
       let msRender = 0;
       for (let v = 0; v < cams.length; v++) {
@@ -1961,7 +1998,7 @@ async function main() {
         camera.pitch = cam.pitch;
         camera.dampYaw = camera.dampPitch = camera.dampPanX = camera.dampPanY = camera.dampZoom = 0;
         pushCamera();
-        setMeshStatus(`Malla de ${label}: vista ${v + 1}/${cams.length} (${W}×${H}, profundidad ${depthKind})…`);
+        setMeshStatus(`Malla de ${targetText}: vista ${v + 1}/${cams.length} (${W}×${H}, profundidad ${depthKind})…`);
         const tv = performance.now();
         const { depth, alpha } = await depthMap(depthKind, W, H);
         const col = await renderer.renderOffscreen({ mode: OUTPUT_MODE.COLOR, width: W, height: H, clearColor: [0, 0, 0, 0] });
@@ -1969,25 +2006,26 @@ async function main() {
         // The renderer's view matrix is the one actually used; take it from the last frame.
         captured.push({ depth, alpha, color: col.data, width: W, height: H, view: Float32Array.from(lastFrame.view), fx: cam.fx, fy: cam.fy, cx: cam.cx, cy: cam.cy });
       }
-      setMeshStatus(`Malla de ${label}: fusionando ${cams.length} vistas en ${resolution}³ vóxeles…`);
+      setMeshStatus(`Malla de ${targetText}: fusionando ${cams.length} vistas en ${resolution}³ vóxeles…`);
       const id = ++meshState.jobId;
       const fused = await new Promise((resolve, reject) => {
         meshState.pending = { id, resolve, reject };
         meshWorker().postMessage(
-          { id, views: captured, center, radius, resolution, carve, repair, fillHoles: repair, maxHoleEdges: 64, printMode: format === "3mf", alphaMin: 0.05 },
+          { id, views: captured, center, radius, resolution, carve, repair, fillHoles: repair, maxHoleEdges: 64, printMode: format === "3mf", keepAll: wholeScene, alphaMin: 0.05 },
           captured.flatMap((c) => [c.depth.buffer, c.alpha.buffer, c.color.buffer])
         );
       });
       const mesh = fused.mesh;
       if (!mesh.vertexCount) throw new Error("la fusión no produjo superficie (¿instancia demasiado pequeña o vistas vacías?)");
       const escena = (window.__gsViewer && window.__gsViewer.name) || "escena";
-      const e = panel.entries.get(label) || {};
+      const e = wholeScene ? {} : panel.entries.get(label) || {};
       const metadatos = {
         version: 2,
         escena,
         fecha: new Date().toISOString(),
-        id_instancia: label,
-        nombre_es: e.nombre_es || e.name || `instancia ${label}`,
+        ambito: scope,
+        id_instancia: wholeScene ? null : label,
+        nombre_es: wholeScene ? "escena completa" : e.nombre_es || e.name || `instancia ${label}`,
         formato: format,
         metodo: { profundidad: depthKind, vistas: cams.length, arista: [W, H], voxeles: resolution, voxel: fused.stats.voxelSize, truncamiento: fused.stats.truncation, tallado: carve, extraccion: format === "3mf" ? "marching-tetrahedra" : "surface-nets", componentes: fused.stats.components, triangulos_descartados: fused.stats.removedTriangles, reparacion: repair },
         malla: {
@@ -2020,19 +2058,19 @@ async function main() {
           validacion: printRepair.after,
           reparacion_post_escala: printRepair.repair,
         };
-        bytes = encode3mf(outputMesh, { name: `${escena} instancia ${label}`, requireWatertight: true });
+        bytes = encode3mf(outputMesh, { name: `${escena} ${targetName}`, requireWatertight: true });
         mime = "model/3mf";
       } else {
-        bytes = encodeGlb(mesh, { name: `${escena} instancia ${label}`, extras: { id_instancia: label, nombre_es: metadatos.nombre_es, escena } });
+        bytes = encodeGlb(mesh, { name: `${escena} ${targetName}`, extras: { ambito: scope, id_instancia: metadatos.id_instancia, nombre_es: metadatos.nombre_es, escena } });
         mime = "model/gltf-binary";
       }
-      const name = exportFileName(escena, label, format);
+      const name = exportFileName(escena, wholeScene ? null : label, format);
       if (download) downloadBlob(new Blob([bytes], { type: mime }), name);
       let savedTo = null;
       if (save) {
         try {
           const fileB64 = await blobToB64(new Blob([bytes]));
-          const payload = { escena, id_instancia: label, formato: format, archivo_b64: fileB64, metadatos };
+          const payload = { escena, ambito: scope, id_instancia: metadatos.id_instancia, formato: format, archivo_b64: fileB64, metadatos };
           if (format === "glb") payload.glb_b64 = fileB64; // compatible with sidecars before metadata v2
           const res = await fetch(`${SIDECAR_URL}/mallas`, {
             method: "POST",
@@ -2046,13 +2084,13 @@ async function main() {
           console.info("[malla] sidecar no disponible para guardar en artifacts/:", err.message);
         }
       }
-      if (savedTo && e) e.malla = savedTo.malla;
+      if (savedTo && !wholeScene && e) e.malla = savedTo.malla;
       const ms = performance.now() - t0;
       const topology = fused.stats.validation;
       const topologyText = topology.watertight
         ? "cerrada"
         : `${topology.boundaryEdges} bordes abiertos · ${topology.nonManifoldEdges} aristas no-manifold`;
-      meshState.last = { label, name, format, stats: fused.stats, metadatos, saved: savedTo, ms, bytes: bytes.byteLength };
+      meshState.last = { scope, label: metadatos.id_instancia, name, format, stats: fused.stats, metadatos, saved: savedTo, ms, bytes: bytes.byteLength };
       setMeshStatus(
         `${name}: ${formatCount(fused.stats.vertices)} vértices · ${formatCount(fused.stats.triangles)} triángulos · ${(bytes.byteLength / 1e6).toFixed(2)} MB · ${topologyText} · render ${Math.round(msRender)} ms · fusión ${Math.round(fused.ms)} ms` +
           (savedTo ? ` · guardado en ${savedTo.malla}` : " · descarga local") +
@@ -2060,7 +2098,7 @@ async function main() {
         metadatos.aviso ? "warn" : "ok"
       );
       return {
-        name, label, format, stats: fused.stats, metadatos, saved: savedTo, ms, bytes: bytes.byteLength,
+        name, scope, label: metadatos.id_instancia, format, stats: fused.stats, metadatos, saved: savedTo, ms, bytes: bytes.byteLength,
         file: download ? null : bytes,
         glb: format === "glb" && !download ? bytes : null,
         threeMf: format === "3mf" && !download ? bytes : null,
@@ -2085,13 +2123,15 @@ async function main() {
   }
 
   meshEl.build.addEventListener("click", () => {
+    const scope = meshEl.scope.value;
     const l = panel.selection ? panel.selection.label : 0;
-    if (!l) { setMeshStatus("selecciona una instancia", "err"); return; }
-    meshInstance(l).catch(() => {});
+    if (scope === "instancia" && !l) { setMeshStatus("selecciona una instancia o cambia el objetivo a escena completa", "err"); return; }
+    meshInstance(scope === "escena" ? null : l, { scope }).catch(() => {});
   });
 
   window.__gsMesh = {
-    build: (label, options) => meshInstance(label, options),
+    build: (label, options = {}) => meshInstance(label, { ...options, scope: options.scope ?? "instancia" }),
+    buildScene: (options = {}) => meshInstance(null, { ...options, scope: "escena" }),
     get last() {
       return meshState.last;
     },
@@ -2278,7 +2318,7 @@ async function main() {
   panel.onAction = (act, label) => {
     if (act === "name") nameInstances({ labels: [label] }).catch(() => {});
     else if (act === "card") cardForInstance(label).catch(() => {});
-    else if (act === "mesh") meshInstance(label).catch(() => {});
+    else if (act === "mesh") meshInstance(label, { scope: "instancia" }).catch(() => {});
   };
   nameEl.button.addEventListener("click", () => nameInstances().catch(() => {}));
   nameEl.search.addEventListener("input", () => panel.search(nameEl.search.value));

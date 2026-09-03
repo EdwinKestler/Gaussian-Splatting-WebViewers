@@ -12,7 +12,7 @@ flowchart TD
   K --> J
   J --> L["F5 Edit<br/>rect · brush · sphere · superpoint selection<br/>move / rotate / scale · duplicate · delete · merge · rename<br/>ops.jsonl replay · undo / redo"]
   L --> X[("Export<br/>PLY + instance_id · .splat · SPZ (GaussForge)<br/>artifacts/exportaciones/")]
-  J --> N["F6 Mesh (worker)<br/>orbit cameras → depth + colour → TSDF + carving"]
+  J --> N["F6 Mesh (worker)<br/>instance or complete visible scene<br/>orbit cameras → depth + colour → TSDF + carving"]
   N --> Y[("Surface nets → GLB with vertex colours<br/>artifacts/mallas/")]
   N --> P["Print path<br/>marching tetrahedra → repair → topology gate<br/>millimetres · z=0"]
   P --> Z[("3MF package<br/>artifacts/mallas/")]
