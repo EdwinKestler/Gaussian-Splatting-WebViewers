@@ -1,0 +1,95 @@
+{
+  "project_slug": "gaussian-splatting-webviewers",
+  "redis_url_envs": [
+    "PROJECT_MEMORY_URL",
+    "GAUSSIAN_SPLATTING_WEBVIEWERS_PROJECT_MEMORY_URL"
+  ],
+  "include_patterns": [
+    ".project-memory.json",
+    "README.md",
+    "AGENTS.md",
+    "docs/**/*.md",
+    "package.json",
+    "playwright.config.mjs",
+    "*.html",
+    "gaussian_splatting_1/**/*.html",
+    "gaussian_splatting_1/**/*.js",
+    "gaussian_splatting_2_aframe/**/*.html",
+    "gaussian_splatting_2_aframe/**/*.js",
+    "gaussian_splatting_2_three.js/**/*.html",
+    "gaussian_splatting_2_three.js/**/*.js",
+    "gaussian_splatting_webgpu/**/*.html",
+    "gaussian_splatting_webgpu/**/*.js",
+    "gaussian_splatting_webgpu/**/*.sh",
+    "shared/**/*.js",
+    "splat_converter/**/*.html",
+    "splat_converter/**/*.js",
+    "semantic_sidecar/**/*.md",
+    "semantic_sidecar/**/*.py",
+    "semantic_sidecar/**/*.sh",
+    "scripts/**/*.sh",
+    "tests/**/*.md",
+    "tests/**/*.html",
+    "tests/**/*.js",
+    "tests/**/*.mjs",
+    ".gitignore"
+  ],
+  "exclude_directories": [
+    ".idea",
+    ".vscode",
+    "artifacts",
+    "img_output",
+    "node_modules",
+    "playwright-report",
+    "splats",
+    "test-results",
+    "vendor",
+    "captures",
+    "cache"
+  ],
+  "exclude_paths": [
+    "splat_converter/main.min.js"
+  ],
+  "evaluation_queries": [
+    {
+      "mode": "search",
+      "query": "WebGPU GaussForge PLY SPZ KSPLAT SOG",
+      "expected_paths": ["README.md"]
+    },
+    {
+      "mode": "search",
+      "query": "detectGaussFormat compression downsampleCloud",
+      "expected_paths": ["gaussian_splatting_webgpu/parse-worker.js"]
+    },
+    {
+      "mode": "search",
+      "query": "thinDiskScale plyVariantFromProperties detectFormat toGaussianCloud",
+      "expected_paths": ["shared/splat-io.js"]
+    },
+    {
+      "mode": "search",
+      "query": "hsvToRgb InstanceSet labelColor",
+      "expected_paths": ["shared/instances.js"]
+    },
+    {
+      "mode": "symbols",
+      "query": "semantic_sidecar.server.Handler",
+      "expected_paths": ["semantic_sidecar/server.py"]
+    },
+    {
+      "mode": "symbols",
+      "query": "semantic_sidecar.server.vision_tag",
+      "expected_paths": ["semantic_sidecar/server.py"]
+    },
+    {
+      "mode": "impact",
+      "query": "semantic_sidecar.server.xai_request",
+      "expected_paths": ["semantic_sidecar/server.py"]
+    },
+    {
+      "mode": "search",
+      "query": "SwiftShader offscreen SELFTEST_OK WebGPU",
+      "expected_paths": ["docs/testing.md"]
+    }
+  ]
+}
