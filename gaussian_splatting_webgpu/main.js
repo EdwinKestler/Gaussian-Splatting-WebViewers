@@ -4,6 +4,8 @@ import { applyNames, frameBounds, instanceBounds, searchInstances } from "../sha
 import { diffuseLabels, groupColor, indicesOfGroup, shDcToRgb } from "../shared/graph.js";
 import { labelColor } from "../shared/instances.js";
 import { makeTwoSpheres } from "../shared/synthetic.js";
+import { EditLog, bakeSession, composeTransform, mat4Multiply, mat4Translation, opsFromJsonl, rangesFromIndices, replay, sessionFingerprint, transformPoint } from "../shared/edit-ops.js";
+import { encodePly, encodeSplat32, exportFileName } from "../shared/export-io.js";
 
 const DEMO_PLY = "./demo.ply";
 const DEFAULT_SCENE = "../splats/alarm_clock_generated.splat";
@@ -159,14 +161,29 @@ function isClick(down, e) {
  * Orbit / pan / zoom on `canvas`. `onClick(cssX, cssY)` fires for a left-button
  * pointerup within CLICK_MAX_PX / CLICK_MAX_MS of its pointerdown (canvas-relative CSS px).
  */
-function bindOrbit(canvas, camera, onClick) {
+function bindOrbit(canvas, camera, onClick, tools = null) {
   let dragging = false;
   let button = 0;
   let lastX = 0;
   let lastY = 0;
   let down = null;
+  /** F5 drag tools (rectángulo / pincel) take the left button; orbit keeps the rest. */
+  let toolDrag = null;
+  const cssPoint = (e) => {
+    const rect = canvas.getBoundingClientRect();
+    return [e.clientX - rect.left, e.clientY - rect.top];
+  };
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());
   canvas.addEventListener("pointerdown", (e) => {
+    const tool = tools ? tools.active() : "clic";
+    if (e.button === 0 && !e.shiftKey && (tool === "rect" || tool === "pincel")) {
+      const [x, y] = cssPoint(e);
+      toolDrag = { tool, x0: x, y0: y, cx: e.clientX, cy: e.clientY };
+      canvas.setPointerCapture(e.pointerId);
+      if (tool === "pincel") tools.onBrush(x, y);
+      else tools.showRect(e.clientX, e.clientY, e.clientX, e.clientY);
+      return;
+    }
     dragging = true;
     button = e.button;
     lastX = e.clientX;
@@ -175,18 +192,37 @@ function bindOrbit(canvas, camera, onClick) {
     canvas.setPointerCapture(e.pointerId);
   });
   canvas.addEventListener("pointerup", (e) => {
+    if (toolDrag) {
+      const [x, y] = cssPoint(e);
+      if (toolDrag.tool === "rect") {
+        tools.hideRect();
+        tools.onRect(toolDrag.x0, toolDrag.y0, x, y);
+      } else tools.onBrushEnd();
+      toolDrag = null;
+      return;
+    }
     dragging = false;
     if (onClick && isClick(down, e)) {
-      const rect = canvas.getBoundingClientRect();
-      onClick(e.clientX - rect.left, e.clientY - rect.top);
+      const [x, y] = cssPoint(e);
+      onClick(x, y);
     }
     down = null;
   });
   canvas.addEventListener("pointercancel", () => {
+    if (toolDrag && toolDrag.tool === "rect") tools.hideRect();
+    toolDrag = null;
     dragging = false;
     down = null;
   });
   canvas.addEventListener("pointermove", (e) => {
+    if (toolDrag) {
+      if (toolDrag.tool === "rect") tools.showRect(toolDrag.cx, toolDrag.cy, e.clientX, e.clientY);
+      else {
+        const [x, y] = cssPoint(e);
+        tools.onBrush(x, y);
+      }
+      return;
+    }
     if (!dragging) return;
     const dx = e.clientX - lastX;
     const dy = e.clientY - lastY;
@@ -528,7 +564,14 @@ async function main() {
 
   const camera = new OrbitCamera();
   const panel = new InstancePanel(renderer, { list: $("inst-list"), status: $("inst-status") });
-  bindOrbit(canvas, camera, (x, y) => pickAt(x, y));
+  bindOrbit(canvas, camera, (x, y) => pickAt(x, y), {
+    active: () => editEl.tool.value,
+    showRect: (x0, y0, x1, y1) => showSelectionRect(x0, y0, x1, y1),
+    hideRect: () => hideSelectionRect(),
+    onRect: (x0, y0, x1, y1) => selectRect(x0, y0, x1, y1).catch((err) => setEditStatus(`Selección fallida: ${err.message}`, "err")),
+    onBrush: (x, y) => brushAt(x, y),
+    onBrushEnd: () => brushEnd(),
+  });
   const worker = new Worker(new URL("./parse-worker.js", import.meta.url), {
     type: "module",
   });
@@ -615,6 +658,12 @@ async function main() {
     const dpr = devicePixelScale();
     try {
       const hit = await renderer.pick(cssX * dpr, cssY * dpr);
+      // F5 tools that select from one click: esfera 3D / superpunto.
+      const tool = editEl.tool.value;
+      if (tool === "esfera" || tool === "grupo") {
+        await selectFromHit(tool, hit);
+        return hit;
+      }
       // Vista Grupos: a click turns the superpoint under the cursor into an instance.
       if (isGroupView() && groups.result && hit.index >= 0 && hit.group > 0) {
         promoteGroup(hit.group, hit.index);
@@ -793,6 +842,7 @@ async function main() {
         return 0;
       }
       const indices = indicesOfGroup(groups.result.superpoint, group - 1);
+      resetEdit();
       renderer.setLabel(indices, label);
       renderer.setInstance(label, { tint: [...groupColor(group), 0] });
       panel.register(label, `grupo ${group}`, indices.length);
@@ -810,6 +860,7 @@ async function main() {
       ui.setStatus("Calcula los grupos antes de difundir etiquetas", "err");
       return null;
     }
+    resetEdit();
     const before = renderer.getLabels();
     const after = diffuseLabels(before, r.csr, r.csr.weights, { iterations });
     let changed = 0;
@@ -1066,6 +1117,7 @@ async function main() {
       return null;
     }
     if (seg.running) throw new Error("ya hay un levantamiento en curso");
+    resetEdit();
     const source = options.source || segEl.source.value;
     const n = Math.max(1, Math.min(12, Number(options.views ?? segEl.views.value) || 1));
     const bias = options.backgroundBias ?? Number(segEl.bias.value);
@@ -1224,6 +1276,531 @@ async function main() {
       return summarizeSeg();
     },
   };
+
+  // ---------------------------------------------------------- Edición (F5)
+
+  /** Scratch label that paints the live selection (never exported). */
+  const SELECT_LABEL = MAX_INSTANCES - 1;
+  const editEl = {
+    tool: $("edit-tool"), mode: $("edit-mode"), brush: $("edit-brush"), sphere: $("edit-sphere"),
+    selNew: $("edit-sel-new"), selAdd: $("edit-sel-add"), selBg: $("edit-sel-bg"), selClear: $("edit-sel-clear"), selStatus: $("edit-sel-status"),
+    tx: $("edit-tx"), ty: $("edit-ty"), tz: $("edit-tz"), axis: $("edit-axis"), deg: $("edit-deg"), scale: $("edit-scale"),
+    apply: $("edit-apply"), reset: $("edit-reset"), duplicate: $("edit-duplicate"), del: $("edit-delete"),
+    merge: $("edit-merge"), mergeTarget: $("edit-merge-target"), rename: $("edit-rename"), name: $("edit-name"),
+    undo: $("edit-undo"), redo: $("edit-redo"), saveOps: $("edit-save-ops"),
+    scope: $("edit-scope"), format: $("edit-format"), export: $("edit-export"), status: $("edit-status"), rect: $("sel-rect"),
+  };
+  /**
+   * log: EditLog over the labels as they were when editing started (its base);
+   * selection: Uint8Array per gaussian while a selection is being built,
+   * labelsBefore: the renderer labels the selection paints over.
+   */
+  const edit = { log: null, selection: null, selCount: 0, labelsBefore: null, brushQueue: Promise.resolve(), sceneRadius: 0, lastDeleted: new Set() };
+
+  function setEditStatus(text, kind = "") {
+    editEl.status.textContent = text;
+    editEl.status.dataset.kind = kind;
+    if (kind === "err") console.warn(`[edición] ${text}`);
+    else console.info(`[edición] ${text}`);
+  }
+
+  /** The edit log, created on demand from the current cloud and labels. */
+  function editLog() {
+    if (!edit.log) {
+      if (!cloud || !cloud.count) throw new Error("carga una escena antes de editar");
+      const names = {};
+      for (const [l, e] of panel.entries) names[l] = e.name;
+      edit.log = new EditLog({ gaussians: cloud.gaussians, sh: cloud.sh, shDegree: cloud.shDegree, labels: edit.labelsBefore || renderer.getLabels(), names });
+    }
+    return edit.log;
+  }
+
+  /** Labels changed outside the log (load, lift, groups): start over from the new state. */
+  function resetEdit() {
+    clearSelection(false);
+    edit.log = null;
+    edit.sceneRadius = 0;
+    edit.lastDeleted = new Set();
+    updateEditButtons();
+  }
+
+  function updateEditButtons() {
+    const has = edit.selCount > 0;
+    editEl.selNew.disabled = !has;
+    editEl.selAdd.disabled = !has || !panel.selection;
+    editEl.selBg.disabled = !has;
+    editEl.selClear.disabled = !has;
+    editEl.undo.disabled = !edit.log || !edit.log.ops.length;
+    editEl.redo.disabled = !edit.log || !edit.log.undone.length;
+    editEl.saveOps.disabled = !edit.log || !edit.log.ops.length;
+    editEl.selStatus.textContent = has ? `${formatCount(edit.selCount)} gaussianas seleccionadas` : "Sin selección.";
+    const l = panel.selection ? panel.selection.label : 0;
+    const deleted = !!(edit.log && l && edit.log.session.deleted.has(l));
+    editEl.del.textContent = deleted ? "Restaurar" : "Borrar";
+  }
+
+  function sceneRadius() {
+    if (!edit.sceneRadius && cloud && cloud.count) {
+      const b = instanceBounds(new Uint32Array(cloud.count).fill(1), cloud.gaussians, 1);
+      edit.sceneRadius = b ? b.radius : 1;
+    }
+    return edit.sceneRadius || 1;
+  }
+
+  // ---- selection (painted with SELECT_LABEL on top of the current labels)
+
+  function ensureSelection() {
+    if (edit.selection) return;
+    edit.selection = new Uint8Array(renderer.count);
+    edit.selCount = 0;
+    edit.labelsBefore = renderer.getLabels();
+    renderer.setInstance(SELECT_LABEL, { tint: [1, 0.85, 0.3, 0.9], selected: true, visible: true });
+  }
+
+  function paintSelection() {
+    const labels = edit.labelsBefore.slice();
+    for (let i = 0; i < labels.length; i++) if (edit.selection[i]) labels[i] = SELECT_LABEL;
+    renderer.setLabels(labels);
+    updateEditButtons();
+  }
+
+  /** Add or remove gaussian indices from the live selection. */
+  function applySelection(indices, mode = editEl.mode.value) {
+    if (!renderer.count) return 0;
+    ensureSelection();
+    let changed = 0;
+    for (const i of indices) {
+      if (i < 0 || i >= edit.selection.length) continue;
+      if (mode === "remove") {
+        if (edit.selection[i]) { edit.selection[i] = 0; edit.selCount--; changed++; }
+      } else if (!edit.selection[i]) { edit.selection[i] = 1; edit.selCount++; changed++; }
+    }
+    paintSelection();
+    return changed;
+  }
+
+  function clearSelection(restore = true) {
+    if (!edit.selection) return;
+    if (restore && edit.labelsBefore && edit.labelsBefore.length === renderer.count) renderer.setLabels(edit.labelsBefore);
+    renderer.setInstance(SELECT_LABEL, { tint: [0, 0, 0, 0], selected: false });
+    edit.selection = null;
+    edit.selCount = 0;
+    edit.labelsBefore = null;
+    updateEditButtons();
+  }
+
+  function selectedIndices() {
+    const out = [];
+    if (edit.selection) for (let i = 0; i < edit.selection.length; i++) if (edit.selection[i]) out.push(i);
+    return out;
+  }
+
+  function showSelectionRect(x0, y0, x1, y1) {
+    const r = editEl.rect.style;
+    r.display = "block";
+    r.left = `${Math.min(x0, x1)}px`;
+    r.top = `${Math.min(y0, y1)}px`;
+    r.width = `${Math.abs(x1 - x0)}px`;
+    r.height = `${Math.abs(y1 - y0)}px`;
+  }
+
+  function hideSelectionRect() {
+    editEl.rect.style.display = "none";
+  }
+
+  async function selectRect(x0, y0, x1, y1, mode = editEl.mode.value) {
+    const dpr = devicePixelScale();
+    const idx = await renderer.pickRect(x0 * dpr, y0 * dpr, x1 * dpr, y1 * dpr);
+    const n = applySelection(idx, mode);
+    setEditStatus(`Rectángulo: ${formatCount(idx.length)} gaussianas visibles, ${formatCount(n)} ${mode === "remove" ? "quitadas" : "añadidas"}`);
+    return idx.length;
+  }
+
+  function brushAt(cssX, cssY, mode = editEl.mode.value) {
+    const dpr = devicePixelScale();
+    const radius = Number(editEl.brush.value) * dpr;
+    edit.brushQueue = edit.brushQueue.then(async () => {
+      const idx = await renderer.pickDisc(cssX * dpr, cssY * dpr, radius);
+      applySelection(idx, mode);
+    }).catch((err) => setEditStatus(`Pincel: ${err.message}`, "err"));
+    return edit.brushQueue;
+  }
+
+  function brushEnd() {
+    return edit.brushQueue.then(() => setEditStatus(`Pincel: ${formatCount(edit.selCount)} gaussianas seleccionadas`));
+  }
+
+  /** Every gaussian within `radius` of the picked gaussian's centre (world units). */
+  function selectSphere(index, radius, mode = editEl.mode.value) {
+    if (!cloud || index < 0 || index >= cloud.count) return 0;
+    const g = cloud.gaussians;
+    const cx = g[index * 12], cy = g[index * 12 + 1], cz = g[index * 12 + 2];
+    const r2 = radius * radius;
+    const idx = [];
+    for (let i = 0; i < cloud.count; i++) {
+      const dx = g[i * 12] - cx, dy = g[i * 12 + 1] - cy, dz = g[i * 12 + 2] - cz;
+      if (dx * dx + dy * dy + dz * dz <= r2) idx.push(i);
+    }
+    const n = applySelection(idx, mode);
+    setEditStatus(`Esfera r=${radius.toFixed(3)}: ${formatCount(idx.length)} gaussianas, ${formatCount(n)} ${mode === "remove" ? "quitadas" : "añadidas"}`);
+    return idx.length;
+  }
+
+  function selectGroup(index, mode = editEl.mode.value) {
+    if (!groups.result) throw new Error("calcula los grupos (F2) para seleccionar por superpunto");
+    if (index < 0 || index >= groups.result.superpoint.length) return 0;
+    const sp = groups.result.superpoint[index];
+    const idx = indicesOfGroup(groups.result.superpoint, sp);
+    const n = applySelection(idx, mode);
+    setEditStatus(`Superpunto ${sp + 1}: ${formatCount(idx.length)} gaussianas, ${formatCount(n)} ${mode === "remove" ? "quitadas" : "añadidas"}`);
+    return idx.length;
+  }
+
+  async function selectFromHit(tool, hit) {
+    if (hit.index < 0) return 0;
+    try {
+      if (tool === "esfera") return selectSphere(hit.index, (Number(editEl.sphere.value) / 100) * sceneRadius());
+      return selectGroup(hit.index);
+    } catch (err) {
+      setEditStatus(err.message, "err");
+      return 0;
+    }
+  }
+
+  /** Turn the selection into labels: "new" instance, "add" to the selected one, or "bg" (fondo). */
+  function commitSelection(mode = "new", target = null) {
+    const idx = selectedIndices();
+    if (!idx.length) throw new Error("no hay selección");
+    const log = editLog();
+    let label;
+    if (mode === "new") label = log.session.nextLabel();
+    else if (mode === "add") {
+      label = target ?? (panel.selection ? panel.selection.label : 0);
+      if (!label) throw new Error("selecciona una instancia de destino");
+    } else label = 0;
+    if (label >= SELECT_LABEL) throw new Error(`sin espacio para más instancias (máximo ${SELECT_LABEL - 1})`);
+    clearSelection(true);
+    const r = pushOp({ op: "asignar", id_instancia: label, rangos: rangesFromIndices(idx) });
+    setEditStatus(`${formatCount(r.count)} gaussianas → ${label ? `instancia ${label}` : "fondo"}`, "ok");
+    if (label) panel.select(label);
+    return label;
+  }
+
+  // ---- ops → renderer / panel
+
+  function pushOp(op) {
+    const log = editLog();
+    const r = log.push(op);
+    syncFromSession();
+    return r;
+  }
+
+  /** Mirror the session (labels, cloud size, transforms, deleted, names) into the renderer and the panel. */
+  function syncFromSession() {
+    const s = editLog().session;
+    clearSelection(false);
+    if (s.count !== renderer.count) {
+      renderer.setCloud(s.gaussians, s.sh, s.shDegree);
+      cloud = { gaussians: s.gaussians, sh: s.sh, shDegree: s.shDegree, count: s.count };
+      resetGroups();
+      naming.crops.clear();
+      edit.sceneRadius = 0;
+    }
+    renderer.setLabels(s.labels);
+    const present = new Set(s.labelSet());
+    for (const l of s.xforms.keys()) present.add(l);
+    for (const l of present) {
+      if (!panel.entries.has(l)) panel.register(l, s.names.get(l) || `instancia ${l}`, 0);
+      else if (s.names.has(l)) panel.entries.get(l).name = s.names.get(l);
+    }
+    for (const l of [...panel.entries.keys()]) if (!present.has(l) && !s.deleted.has(l)) panel.entries.delete(l);
+    for (const l of panel.entries.keys()) {
+      const wasVisible = renderer.getInstance(l).visible;
+      const undeleted = edit.lastDeleted.has(l) && !s.deleted.has(l); // restaurar / undo of borrar
+      renderer.setInstance(l, { xform: s.xformOf(l), visible: s.deleted.has(l) ? false : wasVisible || undeleted });
+    }
+    edit.lastDeleted = new Set(s.deleted);
+    panel.refreshCounts(s.labels);
+    if (panel.selection && !panel.entries.has(panel.selection.label)) panel.clear();
+    updateEditButtons();
+  }
+
+  function currentLabel() {
+    const l = panel.selection ? panel.selection.label : 0;
+    if (!l) throw new Error("selecciona una instancia");
+    return l;
+  }
+
+  /** Absolute xform (spec.xform) or a relative move/rotate/scale about the instance centre. */
+  function transformInstance(label, spec = {}) {
+    const s = editLog().session;
+    let m;
+    if (spec.xform) m = Float32Array.from(spec.xform);
+    else {
+      const c = s.centreOf(label) || [0, 0, 0];
+      const pivot = transformPoint(s.xformOf(label), c);
+      m = mat4Multiply(composeTransform({ ...spec, pivot }), s.xformOf(label));
+    }
+    pushOp({ op: "transformar", id_instancia: label, xform: Array.from(m) });
+    setEditStatus(`Instancia ${label} transformada`, "ok");
+    return Array.from(m);
+  }
+
+  function duplicateInstance(label, offset = null) {
+    const s = editLog().session;
+    const nueva = s.nextLabel();
+    if (nueva >= SELECT_LABEL) throw new Error("sin espacio para más instancias");
+    let shift = offset;
+    if (!shift) {
+      const b = instanceBounds(s.labels, s.gaussians, label);
+      shift = [b ? b.radius * 2 : 1, 0, 0];
+    }
+    const xform = mat4Multiply(mat4Translation(shift), s.xformOf(label));
+    const r = pushOp({ op: "duplicar", id_instancia: label, nueva, xform: Array.from(xform) });
+    setEditStatus(`Instancia ${label} duplicada → ${nueva} (${formatCount(r.count)} gaussianas)`, "ok");
+    panel.select(nueva);
+    return nueva;
+  }
+
+  function deleteInstance(label) {
+    pushOp({ op: "borrar", id_instancia: label });
+    setEditStatus(`Instancia ${label} borrada (oculta y excluida de la exportación)`, "ok");
+  }
+
+  function restoreInstance(label) {
+    pushOp({ op: "restaurar", id_instancia: label });
+    renderer.setInstance(label, { visible: true });
+    panel.renderList();
+    setEditStatus(`Instancia ${label} restaurada`, "ok");
+  }
+
+  function mergeInstances(origen, destino) {
+    if (origen === destino) throw new Error("origen y destino son la misma instancia");
+    if (!panel.entries.has(destino)) throw new Error(`no existe la instancia ${destino}`);
+    const r = pushOp({ op: "fusionar", origen, destino });
+    setEditStatus(`Instancia ${origen} fusionada en ${destino} (${formatCount(r.count)} gaussianas)`, "ok");
+    panel.select(destino);
+    return destino;
+  }
+
+  function renameInstance(label, nombre) {
+    const name = String(nombre || "").trim();
+    if (!name) throw new Error("escribe un nombre");
+    pushOp({ op: "renombrar", id_instancia: label, nombre_es: name });
+    const e = panel.entries.get(label);
+    if (e) { e.nombre_es = name; e.name = name; }
+    panel.renderList();
+    setEditStatus(`Instancia ${label} → «${name}»`, "ok");
+  }
+
+  function undoEdit() {
+    const log = editLog();
+    const op = log.undo();
+    if (!op) return null;
+    syncFromSession();
+    setEditStatus(`Deshecho: ${op.op}`, "ok");
+    return op;
+  }
+
+  function redoEdit() {
+    const log = editLog();
+    const op = log.redo();
+    if (!op) return null;
+    syncFromSession();
+    setEditStatus(`Rehecho: ${op.op}`, "ok");
+    return op;
+  }
+
+  /** Replace the log with ops from a JSONL text (replayed over the current base). */
+  function replayOps(jsonl) {
+    const ops = opsFromJsonl(jsonl);
+    const base = editLog().base;
+    replay(base, ops); // validate first: throws before touching the viewer
+    edit.log = new EditLog(base, ops);
+    syncFromSession();
+    setEditStatus(`${ops.length} operaciones reproducidas`, "ok");
+    return ops.length;
+  }
+
+  /** Convert bytes with the vendored GaussForge in the parse worker (PLY → SPZ, compressed PLY, …). */
+  function convertBytes(buffer, inFormat, outFormat) {
+    const id = ++jobId;
+    return new Promise((resolve, reject) => {
+      convertPending = { id, resolve, reject };
+      worker.postMessage({ id, type: "convert", buffer, inFormat, outFormat }, [buffer]);
+    }).then((msg) => msg.bytes);
+  }
+
+  /**
+   * Export one instance or the visible scene with the transforms baked in.
+   * PLY carries instance_id / class_id / confidence; SPZ and compressed PLY go
+   * through GaussForge from that PLY; .splat is SH0 only.
+   */
+  async function exportObject({ scope = editEl.scope.value, label = null, format = editEl.format.value, download = true, save = true } = {}) {
+    const log = editLog();
+    const s = log.session;
+    if (scope === "instancia") label = label ?? currentLabel();
+    const hidden = new Set();
+    for (const l of panel.entries.keys()) if (!renderer.getInstance(l).visible) hidden.add(l);
+    const baked = scope === "instancia" ? bakeSession(s, { label }) : bakeSession(s, { hidden });
+    if (!baked.count) throw new Error("nada que exportar (¿instancia vacía, borrada u oculta?)");
+    const clases = [...new Set([...panel.entries.values()].map((e) => e.categoria).filter(Boolean))].sort();
+    const classIds = new Uint32Array(baked.count);
+    const confidences = new Float32Array(baked.count);
+    for (let i = 0; i < baked.count; i++) {
+      const e = panel.entries.get(baked.labels[i]);
+      if (!e) continue;
+      classIds[i] = e.categoria ? clases.indexOf(e.categoria) + 1 : 0;
+      confidences[i] = Number.isFinite(e.confianza) ? e.confianza : 0;
+    }
+    const escena = (window.__gsViewer && window.__gsViewer.name) || "escena";
+    const t0 = performance.now();
+    setEditStatus(`Exportando ${scope === "instancia" ? `instancia ${label}` : "escena"} como ${format} (${formatCount(baked.count)} gaussianas)…`);
+    let bytes;
+    const comment = `F5 ${escena} ${scope}${label != null ? ` instancia ${label}` : ""}`;
+    if (format === "splat") bytes = encodeSplat32(baked);
+    else if (format === "ply") bytes = new Uint8Array(encodePly(baked, { labels: baked.labels, classIds, confidences, comment }));
+    else bytes = await convertBytes(encodePly(baked, { comment }), "ply", format); // SPZ & co. cannot carry the extras
+    const name = exportFileName(escena, scope === "instancia" ? label : null, format);
+    const labelsOut = scope === "instancia" ? [label] : [...new Set(baked.labels)].filter((l) => l > 0).sort((a, b) => a - b);
+    const metadatos = {
+      version: 1,
+      escena,
+      fecha: new Date().toISOString(),
+      ambito: scope,
+      id_instancia: scope === "instancia" ? label : null,
+      formato: format,
+      archivo: name,
+      n_gaussianas: baked.count,
+      sh_grado: baked.shDegree,
+      clases,
+      transformaciones_aplicadas: labelsOut.filter((l) => s.xforms.has(l)),
+      n_operaciones: log.ops.length,
+      instancias: labelsOut.map((l) => {
+        const e = panel.entries.get(l) || {};
+        const b = instanceBounds(baked.labels, baked.gaussians, l);
+        return { id_instancia: l, nombre: e.nombre || e.name || `instancia ${l}`, nombre_es: e.nombre_es || e.name || `instancia ${l}`, categoria: e.categoria || "", confianza: Number.isFinite(e.confianza) ? e.confianza : null, n_gaussianas: b ? b.count : 0, bbox: b ? { min: b.min, max: b.max } : null, xform: Array.from(s.xformOf(l)) };
+      }),
+    };
+    if (download) downloadBlob(new Blob([bytes], { type: "application/octet-stream" }), name);
+    let saved = null;
+    if (save) {
+      try {
+        const res = await fetch(`${SIDECAR_URL}/exportaciones`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ escena, id_instancia: metadatos.id_instancia, formato: format, bytes_b64: await blobToB64(new Blob([bytes])), metadatos, ops_jsonl: log.toJsonl() }),
+        });
+        const data = await res.json();
+        if (res.ok && data.ok) saved = data;
+        else console.info("[edición] el sidecar no guardó la exportación:", data.error || res.status);
+      } catch (err) {
+        console.info("[edición] sidecar no disponible para guardar en artifacts/:", err.message);
+      }
+    }
+    const ms = performance.now() - t0;
+    setEditStatus(`${name}: ${formatCount(baked.count)} gaussianas · ${(bytes.length / 1e6).toFixed(2)} MB · ${ms.toFixed(0)} ms` + (saved ? ` · guardado en ${saved.archivo}` : " · descarga local"), "ok");
+    return { name, format, count: baked.count, bytes: bytes.length, saved, metadatos, data: download ? null : bytes };
+  }
+
+  /** Save ops.jsonl (plus the base labels it applies to) next to instancias.json / etiquetas.u32. */
+  async function saveOps() {
+    const log = editLog();
+    const { json, bytes } = buildSegmentationExport();
+    const res = await fetch(`${SIDECAR_URL}/segmentaciones`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        escena: json.escena,
+        instancias: json,
+        etiquetas_b64: await blobToB64(new Blob([bytes])),
+        etiquetas_base_b64: await blobToB64(new Blob([labelsToBytes(log.base.labels)])),
+        ops_jsonl: log.toJsonl(),
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    setEditStatus(`${log.ops.length} operaciones guardadas en ${data.ops}`, "ok");
+    return data;
+  }
+
+  // ---- HUD wiring
+  const guard = (fn) => () => {
+    try {
+      const r = fn();
+      if (r && typeof r.catch === "function") r.catch((err) => setEditStatus(err.message, "err"));
+    } catch (err) {
+      setEditStatus(err.message, "err");
+    }
+  };
+  const axisVec = () => ({ x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] })[editEl.axis.value] || [0, 1, 0];
+  editEl.tool.addEventListener("change", () => {
+    document.body.classList.toggle("tool-rect", editEl.tool.value === "rect");
+    document.body.classList.toggle("tool-pincel", editEl.tool.value === "pincel");
+  });
+  editEl.selNew.addEventListener("click", guard(() => commitSelection("new")));
+  editEl.selAdd.addEventListener("click", guard(() => commitSelection("add")));
+  editEl.selBg.addEventListener("click", guard(() => commitSelection("bg")));
+  editEl.selClear.addEventListener("click", () => { clearSelection(true); setEditStatus("Selección limpiada"); });
+  editEl.apply.addEventListener("click", guard(() => {
+    const spec = { translate: [Number(editEl.tx.value) || 0, Number(editEl.ty.value) || 0, Number(editEl.tz.value) || 0], rotateAxis: axisVec(), rotateDeg: Number(editEl.deg.value) || 0, scale: Number(editEl.scale.value) || 1 };
+    transformInstance(currentLabel(), spec);
+    editEl.tx.value = editEl.ty.value = editEl.tz.value = "0";
+    editEl.deg.value = "0";
+    editEl.scale.value = "1";
+  }));
+  editEl.reset.addEventListener("click", guard(() => transformInstance(currentLabel(), { xform: Array.from(mat4Translation([0, 0, 0])) })));
+  editEl.duplicate.addEventListener("click", guard(() => duplicateInstance(currentLabel())));
+  editEl.del.addEventListener("click", guard(() => {
+    const l = currentLabel();
+    if (editLog().session.deleted.has(l)) restoreInstance(l);
+    else deleteInstance(l);
+  }));
+  editEl.merge.addEventListener("click", guard(() => mergeInstances(currentLabel(), Number(editEl.mergeTarget.value) | 0)));
+  editEl.rename.addEventListener("click", guard(() => renameInstance(currentLabel(), editEl.name.value)));
+  editEl.undo.addEventListener("click", guard(() => undoEdit()));
+  editEl.redo.addEventListener("click", guard(() => redoEdit()));
+  editEl.saveOps.addEventListener("click", guard(() => saveOps()));
+  editEl.export.addEventListener("click", guard(() => exportObject()));
+  document.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z" && !e.target.matches("input, textarea, select")) {
+      e.preventDefault();
+      guard(() => (e.shiftKey ? redoEdit() : undoEdit()))();
+    }
+  });
+
+  window.__gsEdit = {
+    select: async ({ tool = "rect", mode = "add", x0 = 0, y0 = 0, x1 = 0, y1 = 0, x = 0, y = 0, index = -1, radius = null } = {}) => {
+      if (tool === "rect") return selectRect(x0, y0, x1, y1, mode);
+      if (tool === "pincel") { await brushAt(x, y, mode); return edit.selCount; }
+      if (tool === "esfera") return selectSphere(index, radius ?? (Number(editEl.sphere.value) / 100) * sceneRadius(), mode);
+      if (tool === "grupo") return selectGroup(index, mode);
+      throw new Error(`herramienta desconocida: ${tool}`);
+    },
+    selection: () => ({ count: edit.selCount, indices: selectedIndices() }),
+    clearSelection: () => clearSelection(true),
+    commit: (mode, target) => commitSelection(mode, target),
+    transform: (label, spec) => transformInstance(label, spec),
+    duplicate: (label, offset) => duplicateInstance(label, offset),
+    remove: (label) => deleteInstance(label),
+    restore: (label) => restoreInstance(label),
+    merge: (origen, destino) => mergeInstances(origen, destino),
+    rename: (label, name) => renameInstance(label, name),
+    undo: () => undoEdit(),
+    redo: () => redoEdit(),
+    replay: (jsonl) => replayOps(jsonl),
+    ops: () => (edit.log ? edit.log.ops.map((o) => ({ ...o })) : []),
+    jsonl: () => (edit.log ? edit.log.toJsonl() : ""),
+    fingerprint: () => sessionFingerprint(editLog().session),
+    session: () => {
+      const s = editLog().session;
+      return { count: s.count, labels: s.labelSet(), xforms: Object.fromEntries([...s.xforms].map(([l, m]) => [l, Array.from(m)])), deleted: [...s.deleted], names: Object.fromEntries(s.names) };
+    },
+    export: (options) => exportObject(options),
+    saveOps: () => saveOps(),
+    reset: () => resetEdit(),
+  };
+  window.__gsLoad = { buffer: (buffer, name) => loadFromBuffer(buffer, name), url: (url, name) => loadUrl(url, name), synthetic: (options) => loadSynthetic(options) };
 
   // ---------------------------------------------------------- Nombrar (F4)
 
@@ -1462,6 +2039,15 @@ async function main() {
     cloud = { gaussians: result.gaussians, sh: result.sh, shDegree: result.shDegree || 0, count: result.count };
     panel.reset();
     resetGroups();
+    resetEdit();
+    let restored = 0;
+    if (result.labels && result.labels.length === result.count) {
+      // F5: a PLY exported with instance_id brings its instances back.
+      renderer.setLabels(result.labels);
+      panel.fromLabels(result.labels);
+      restored = panel.entries.size;
+      console.info(`[edición] ${restored} instancias restauradas desde instance_id`);
+    }
     camera.fit(result.bounds);
     const decoder = result.decoder === "gaussforge" ? "GaussForge" : "built-in";
     const degree = result.shDegree || 0;
@@ -1489,7 +2075,7 @@ async function main() {
         "ok"
       );
     }
-    const note = result.warning ? `Ready (${result.warning})` : "Ready";
+    const note = (result.warning ? `Ready (${result.warning})` : "Ready") + (restored ? ` · ${restored} instancias (instance_id)` : "");
     ui.setStatus(note, "ok");
     ui.setProgress(1);
     ui.showOverlay(false);
@@ -1500,6 +2086,8 @@ async function main() {
       shDegree: degree,
       count: result.count,
       compact,
+      labelSource: result.labelSource || null,
+      restoredInstances: restored,
     };
   }
 
@@ -1513,6 +2101,7 @@ async function main() {
     cloud = { gaussians: scene.gaussians, sh: scene.sh, shDegree: scene.shDegree, count: scene.count };
     panel.reset();
     resetGroups();
+    resetEdit();
     if (applyLabels) {
       renderer.setLabels(scene.labels);
       panel.fromLabels(scene.labels, scene.names);

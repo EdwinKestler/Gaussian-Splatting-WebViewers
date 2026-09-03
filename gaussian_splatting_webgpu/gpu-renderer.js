@@ -1685,6 +1685,28 @@ export class WebGPUSplatRenderer {
     return Uint32Array.from(seen).sort();
   }
 
+  /**
+   * Unique gaussian indices visible inside a pixel disc (brush selection, F5).
+   * @returns {Promise<Uint32Array>} ascending indices
+   */
+  async pickDisc(cx, cy, radius) {
+    const frame = await this._idFrame();
+    const r = Math.max(0.5, radius);
+    const xa = Math.max(0, Math.floor(cx - r));
+    const ya = Math.max(0, Math.floor(cy - r));
+    const xb = Math.min(frame.width - 1, Math.ceil(cx + r));
+    const yb = Math.min(frame.height - 1, Math.ceil(cy + r));
+    const seen = new Set();
+    for (let y = ya; y <= yb; y++) {
+      for (let x = xa; x <= xb; x++) {
+        if ((x + 0.5 - cx) ** 2 + (y + 0.5 - cy) ** 2 > r * r) continue;
+        const v = frame.data[y * frame.width + x];
+        if (v) seen.add(v - 1);
+      }
+    }
+    return Uint32Array.from(seen).sort();
+  }
+
   async snapshotPng(maxEdge = 1024) {
     if (!this.device || !this.context) {
       throw new Error("WebGPU is not initialized");

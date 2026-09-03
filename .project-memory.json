@@ -113,6 +113,16 @@
     },
     {
       "mode": "search",
+      "query": "EditSession replay ops.jsonl bakeSession transformar duplicar fusionar",
+      "expected_paths": ["shared/edit-ops.js"]
+    },
+    {
+      "mode": "search",
+      "query": "encodePly encodeSplat32 instance_id class_id confidence exportFileName",
+      "expected_paths": ["shared/export-io.js"]
+    },
+    {
+      "mode": "search",
       "query": "instanceBounds frameBounds searchInstances applyNames nombre_es categoria",
       "expected_paths": ["shared/naming.js"]
     }

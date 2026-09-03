@@ -24,6 +24,8 @@ ROOT = Path(__file__).resolve().parents[1]
 ENV_PATH = ROOT / ".env"
 OUTPUT_DIR = ROOT / "img_output"
 SEGMENT_DIR = ROOT / "artifacts" / "segmentaciones"
+EXPORT_DIR = ROOT / "artifacts" / "exportaciones"
+EXPORT_FORMATS = {"ply", "splat", "spz", "compressed.ply", "ksplat", "sog"}
 # Optional SAM backend: "package.module:function"; function(image: PIL.Image, prompts: list[str])
 # -> (labels: list[list[int]] | array HxW (0 = fondo, k = object k), objects: list[{"id", "name", ...}])
 SAM_BACKEND = os.environ.get("SAM_BACKEND", "")
@@ -575,6 +577,43 @@ def segment_views(body: dict) -> dict:
     return {"ok": True, "backend": backend, "vision_model": VISION_MODEL if backend == "grok-boxes" else None, "views": out_views}
 
 
+def save_export(body: dict) -> dict:
+    """POST /exportaciones (F5): persist an exported instance/scene under artifacts/exportaciones/<escena>/."""
+    formato = str(body.get("formato") or "")
+    if formato not in EXPORT_FORMATS:
+        raise RuntimeError(f"formato no admitido: {formato!r} (admitidos: {', '.join(sorted(EXPORT_FORMATS))})")
+    raw = base64.b64decode(body.get("bytes_b64") or "")
+    if not raw:
+        raise RuntimeError("bytes_b64 vacío")
+    escena = slug(str(body.get("escena") or "escena"))
+    label = body.get("id_instancia")
+    if label is not None and (not isinstance(label, int) or label < 0):
+        raise RuntimeError("id_instancia debe ser un entero no negativo o null")
+    folder = EXPORT_DIR / escena
+    folder.mkdir(parents=True, exist_ok=True)
+    stem = f"instancia-{label}" if label is not None else "escena"
+    out = folder / f"{stem}.{formato}"
+    out.write_bytes(raw)
+    meta = body.get("metadatos")
+    meta_path = None
+    if isinstance(meta, dict):
+        meta_path = folder / f"{stem}.json"
+        meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    ops = body.get("ops_jsonl")
+    ops_path = None
+    if isinstance(ops, str) and ops.strip():
+        ops_path = folder / "ops.jsonl"
+        ops_path.write_text(ops if ops.endswith("\n") else ops + "\n", encoding="utf-8")
+    return {
+        "ok": True,
+        "carpeta": str(folder.relative_to(ROOT)),
+        "archivo": str(out.relative_to(ROOT)),
+        "bytes": len(raw),
+        "metadatos": str(meta_path.relative_to(ROOT)) if meta_path else None,
+        "ops": str(ops_path.relative_to(ROOT)) if ops_path else None,
+    }
+
+
 def save_segmentation(body: dict) -> dict:
     """POST /segmentaciones: persist instancias.json + etiquetas.u32 under artifacts/."""
     instancias = body.get("instancias")
@@ -592,11 +631,18 @@ def save_segmentation(body: dict) -> dict:
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "instancias.json").write_text(json.dumps(instancias, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     (folder / "etiquetas.u32").write_bytes(raw)
+    ops = body.get("ops_jsonl")
+    if isinstance(ops, str) and ops.strip():
+        (folder / "ops.jsonl").write_text(ops if ops.endswith("\n") else ops + "\n", encoding="utf-8")
+    base = base64.b64decode(body.get("etiquetas_base_b64") or "")
+    if base and len(base) % 4 == 0:
+        (folder / "etiquetas_base.u32").write_bytes(base)  # ops.jsonl replays over these
     return {
         "ok": True,
         "carpeta": str(folder.relative_to(ROOT)),
         "instancias": str((folder / "instancias.json").relative_to(ROOT)),
         "etiquetas": str((folder / "etiquetas.u32").relative_to(ROOT)),
+        "ops": str((folder / "ops.jsonl").relative_to(ROOT)) if isinstance(ops, str) and ops.strip() else None,
         "n_instancias": len(instancias.get("instancias") or []),
     }
 
@@ -638,6 +684,7 @@ class Handler(BaseHTTPRequestHandler):
                     "segment_backends": ["grok-boxes"] + (["sam"] if SAM_BACKEND else []),
                     "name_backend": NAME_BACKEND,
                     "segmentaciones": str(SEGMENT_DIR),
+                    "exportaciones": str(EXPORT_DIR),
                 },
             )
             return
@@ -667,6 +714,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/segmentaciones":
                 self._json(200, save_segmentation(body))
+                return
+            if path == "/exportaciones":
+                self._json(200, save_export(body))
                 return
             if path == "/card":
                 img = decode_png(body.get("png_b64") or "")

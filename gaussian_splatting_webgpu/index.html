@@ -217,10 +217,21 @@
     .inst-meta { grid-column: 2 / -1; color: var(--muted); font-size: 11px; }
     #inst-name-status[data-kind="ok"] { color: var(--accent); }
     #inst-name-status[data-kind="err"] { color: var(--err); }
+    #edit-panel { margin: 12px 0 4px; padding-top: 10px; border-top: 1px solid var(--line); }
+    #edit-panel h2 { margin: 0 0 2px; font-size: 13px; font-weight: 650; }
+    #edit-panel .row { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin: 4px 0; }
+    #edit-panel .row input[type="number"] { width: 58px; }
+    #edit-panel .row input[type="text"] { flex: 1; min-width: 90px; }
+    #edit-panel select { max-width: 100%; }
+    #edit-status[data-kind="ok"] { color: var(--accent); }
+    #edit-status[data-kind="err"] { color: var(--err); }
+    #sel-rect { position: fixed; pointer-events: none; border: 1px dashed var(--accent); background: rgba(126, 224, 200, 0.12); display: none; z-index: 5; }
+    body.tool-rect canvas, body.tool-pincel canvas { cursor: crosshair; }
   </style>
 </head>
 <body>
   <canvas id="gpu-canvas"></canvas>
+  <div id="sel-rect"></div>
   <div id="sem-overlay"></div>
   <aside id="hud">
     <h1>WebGPU 3DGS Viewer</h1>
@@ -324,6 +335,88 @@
         <button id="seg-export" type="button" disabled>Exportar instancias</button>
       </div>
       <div id="seg-status" class="inst-hint">Sin segmentación. Elige una fuente de máscaras y pulsa «Levantar máscaras».</div>
+    </section>
+    <section id="edit-panel">
+      <h2>Edición</h2>
+      <p class="inst-hint">Selecciona gaussianas (rectángulo, pincel, esfera 3D o superpunto), conviértelas en instancia y edita cada objeto: mover, rotar, escalar, duplicar, borrar, fusionar. Todo queda en <code>ops.jsonl</code> (deshacer/rehacer) y se exporta por instancia o escena.</p>
+      <div class="row">
+        <label>Herramienta
+          <select id="edit-tool">
+            <option value="clic">Clic (instancia)</option>
+            <option value="rect">Rectángulo</option>
+            <option value="pincel">Pincel</option>
+            <option value="esfera">Esfera 3D</option>
+            <option value="grupo">Superpunto</option>
+          </select>
+          <span></span>
+        </label>
+        <label>Modo
+          <select id="edit-mode">
+            <option value="add">Añadir</option>
+            <option value="remove">Quitar</option>
+          </select>
+          <span></span>
+        </label>
+      </div>
+      <label>Pincel (px) <input id="edit-brush" type="range" min="4" max="120" step="1" value="24" /><span class="val"></span></label>
+      <label>Esfera (% escena) <input id="edit-sphere" type="range" min="1" max="50" step="1" value="10" /><span class="val"></span></label>
+      <div class="btns">
+        <button id="edit-sel-new" type="button" disabled>Nueva instancia</button>
+        <button id="edit-sel-add" type="button" disabled>Añadir a seleccionada</button>
+        <button id="edit-sel-bg" type="button" disabled>Quitar (fondo)</button>
+        <button id="edit-sel-clear" type="button" disabled>Limpiar selección</button>
+      </div>
+      <div id="edit-sel-status" class="inst-hint">Sin selección.</div>
+      <div class="row">
+        <span class="inst-hint">Mover</span>
+        <input id="edit-tx" type="number" step="0.05" value="0" title="x" />
+        <input id="edit-ty" type="number" step="0.05" value="0" title="y" />
+        <input id="edit-tz" type="number" step="0.05" value="0" title="z" />
+      </div>
+      <div class="row">
+        <span class="inst-hint">Rotar</span>
+        <select id="edit-axis"><option value="x">eje x</option><option value="y" selected>eje y</option><option value="z">eje z</option></select>
+        <input id="edit-deg" type="number" step="5" value="0" title="grados" />
+        <span class="inst-hint">Escala</span>
+        <input id="edit-scale" type="number" step="0.1" min="0.01" value="1" />
+      </div>
+      <div class="btns">
+        <button id="edit-apply" type="button">Aplicar a la seleccionada</button>
+        <button id="edit-reset" type="button">Restablecer</button>
+        <button id="edit-duplicate" type="button">Duplicar</button>
+        <button id="edit-delete" type="button">Borrar</button>
+      </div>
+      <div class="row">
+        <button id="edit-merge" type="button">Fusionar con #</button>
+        <input id="edit-merge-target" type="number" min="1" step="1" value="1" />
+        <button id="edit-rename" type="button">Renombrar</button>
+        <input id="edit-name" type="text" placeholder="nombre en español" />
+      </div>
+      <div class="btns">
+        <button id="edit-undo" type="button" disabled>Deshacer</button>
+        <button id="edit-redo" type="button" disabled>Rehacer</button>
+        <button id="edit-save-ops" type="button" disabled>Guardar ops.jsonl</button>
+      </div>
+      <div class="row">
+        <label>Exportar
+          <select id="edit-scope">
+            <option value="instancia">instancia seleccionada</option>
+            <option value="escena">escena visible</option>
+          </select>
+          <span></span>
+        </label>
+        <label>Formato
+          <select id="edit-format">
+            <option value="ply">PLY (3DGS + instance_id)</option>
+            <option value="splat">.splat (SH0)</option>
+            <option value="spz">SPZ (GaussForge)</option>
+            <option value="compressed.ply">PLY comprimido (GaussForge)</option>
+          </select>
+          <span></span>
+        </label>
+        <button id="edit-export" type="button">Exportar</button>
+      </div>
+      <div id="edit-status" class="inst-hint">Sin ediciones.</div>
     </section>
     <div class="btns">
       <button id="sem-analyze" type="button">Tag scene (Grok)</button>
