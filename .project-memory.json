@@ -90,6 +90,11 @@
       "mode": "search",
       "query": "SwiftShader offscreen SELFTEST_OK WebGPU",
       "expected_paths": ["docs/testing.md"]
+    },
+    {
+      "mode": "search",
+      "query": "buildSuperpointGraph connectedComponents diffuseLabels kNN Mahalanobis superpoint",
+      "expected_paths": ["shared/graph.js"]
     }
   ]
 }

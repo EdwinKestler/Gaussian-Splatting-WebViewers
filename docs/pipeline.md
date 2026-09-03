@@ -49,6 +49,7 @@ Later / optional (not in the sidecar today)
 | 1 Decode | PLY (3DGS / 2DGS) / SPLAT / SPZ / … | GaussForge (vendored, offline) → `shared/splat-io.js` fallback |
 | 2 Rasterize | Paper 3DGS ellipses | This WebGPU viewer |
 | 2b Identity (F1) | Label per Gaussian, instance table, ID / depth / normal readback, `pick()` | `gpu-renderer.js`, HUD *Instancias* |
+| 2c Superpoints (F2) | kNN + Mahalanobis/colour weights → connected components; group → instance on click; label diffusion | `shared/graph.js` in `graph-worker.js`, HUD *Grupos* |
 | 3 Capture | PNG + yaw/pitch/eye | `canvas` snapshot |
 | 4 Tag | Open-vocab names + boxes | `grok-4.6` vision |
 | 5 Cluster | Merge armchair/sofa/seat | name key in sidecar |

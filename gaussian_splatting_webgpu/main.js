@@ -1,4 +1,5 @@
-import { WebGPUSplatRenderer } from "./gpu-renderer.js";
+import { WebGPUSplatRenderer, MAX_INSTANCES } from "./gpu-renderer.js";
+import { diffuseLabels, groupColor, indicesOfGroup, shDcToRgb } from "../shared/graph.js";
 import { labelColor } from "../shared/instances.js";
 import { makeTwoSpheres } from "../shared/synthetic.js";
 
@@ -314,6 +315,17 @@ class InstancePanel {
     return e ? e.name : `instancia ${label}`;
   }
 
+  /** Recount gaussians per registered label (e.g. after a label diffusion). */
+  refreshCounts(labels) {
+    const counts = new Map();
+    for (let i = 0; i < labels.length; i++) {
+      const l = labels[i];
+      if (l) counts.set(l, (counts.get(l) || 0) + 1);
+    }
+    for (const [label, e] of this.entries) e.count = counts.get(label) || 0;
+    this.renderList();
+  }
+
   setStatus(text) {
     this.statusEl.textContent = text;
   }
@@ -490,6 +502,19 @@ async function main() {
   let lastSemantic = null;
   /** Matrices used by the last presented frame (for projecting points to pixels). */
   let lastFrame = null;
+  /** CPU copy of the loaded cloud (input for the F2 graph worker). */
+  let cloud = null; // { gaussians, sh, shDegree, count }
+  /** F2 superpoint graph state (see shared/graph.js / graph-worker.js). */
+  const groups = {
+    result: null,
+    worker: null,
+    pending: null,
+    jobId: 0,
+    computing: false,
+    prevColorMode: "0",
+    /** superpoint id (1-based) → F1 instance label created by a click */
+    instanceOfGroup: new Map(),
+  };
 
   const paramsFromUi = () => ({
     pointMode: $("point-mode").checked ? 1 : 0,
@@ -550,6 +575,11 @@ async function main() {
     const dpr = devicePixelScale();
     try {
       const hit = await renderer.pick(cssX * dpr, cssY * dpr);
+      // Vista Grupos: a click turns the superpoint under the cursor into an instance.
+      if (isGroupView() && groups.result && hit.index >= 0 && hit.group > 0) {
+        promoteGroup(hit.group, hit.index);
+        return hit;
+      }
       panel.selectHit(hit);
       return hit;
     } catch (err) {
@@ -569,6 +599,207 @@ async function main() {
       worker.postMessage({ id, buffer, name, compression }, [buffer]);
     });
   }
+
+  // ------------------------------------------------------------ Grupos (F2)
+
+  const grpEl = {
+    status: $("grp-status"),
+    compute: $("grp-compute"),
+    view: $("grp-view"),
+    diffuse: $("grp-diffuse"),
+    k: $("grp-k"),
+    threshold: $("grp-threshold"),
+    sigma: $("grp-sigma"),
+  };
+
+  function setGroupStatus(text, kind = "") {
+    grpEl.status.textContent = text;
+    grpEl.status.dataset.kind = kind;
+  }
+
+  function isGroupView() {
+    return Number($("color-mode").value) === 4;
+  }
+
+  /** Switch the Color selector to/from «Grupos» (mode 4), remembering the previous mode. */
+  function setGroupView(on) {
+    const sel = $("color-mode");
+    if (on) {
+      if (sel.value !== "4") groups.prevColorMode = sel.value;
+      sel.value = "4";
+    } else if (sel.value === "4") {
+      sel.value = groups.prevColorMode || "0";
+    }
+    grpEl.view.classList.toggle("active", isGroupView());
+  }
+
+  /** Forget the graph of the previous cloud. */
+  function resetGroups() {
+    groups.result = null;
+    groups.instanceOfGroup.clear();
+    if (renderer.count) renderer.setGroups(null);
+    grpEl.diffuse.disabled = true;
+    setGroupStatus("Sin grupos. Calcula el grafo para colorear superpuntos.");
+    if (isGroupView()) setGroupView(false);
+  }
+
+  function graphOptionsFromUi() {
+    return {
+      k: Number(grpEl.k.value) || 10,
+      threshold: Number(grpEl.threshold.value),
+      sigmaColor: Number(grpEl.sigma.value),
+    };
+  }
+
+  function getGraphWorker() {
+    if (groups.worker) return groups.worker;
+    const w = new Worker(new URL("../shared/graph-worker.js", import.meta.url), { type: "module" });
+    w.onmessage = (e) => {
+      const msg = e.data;
+      if (!groups.pending || msg.id !== groups.pending.id) return;
+      const { resolve, reject } = groups.pending;
+      groups.pending = null;
+      if (msg.ok) resolve(msg.result);
+      else reject(new Error(msg.error));
+    };
+    w.onerror = (e) => {
+      if (!groups.pending) return;
+      groups.pending.reject(new Error(e.message || "error en graph-worker"));
+      groups.pending = null;
+    };
+    groups.worker = w;
+    return w;
+  }
+
+  function summarizeGroups() {
+    const r = groups.result;
+    if (!r) return null;
+    return {
+      count: r.count,
+      superpointCount: r.superpointCount,
+      sizes: Array.from(r.sizes.subarray(0, 32)),
+      k: r.k,
+      cellSize: r.cellSize,
+      threshold: r.threshold,
+      sigmaColor: r.sigmaColor,
+      stats: { ...r.stats },
+    };
+  }
+
+  function applyGroups(result, ms) {
+    groups.result = result;
+    groups.instanceOfGroup.clear();
+    const ids = new Uint32Array(result.count);
+    for (let i = 0; i < result.count; i++) ids[i] = result.superpoint[i] + 1;
+    renderer.setGroups(ids);
+    grpEl.diffuse.disabled = false;
+    const sizes = result.sizes;
+    const median = sizes.length ? sizes[sizes.length >> 1] : 0;
+    setGroupStatus(
+      `${formatCount(result.superpointCount)} grupos · mayor ${formatCount(sizes[0] || 0)} · mediana ${formatCount(median)} gaussianas · ` +
+        `grado medio ${result.stats.avgDegree.toFixed(1)} · ${ms.toFixed(0)} ms`,
+      "ok"
+    );
+    console.info(`[grupos] ${result.superpointCount} superpuntos de ${result.count} gaussianas en ${ms.toFixed(0)} ms`, result.stats);
+    setGroupView(true);
+  }
+
+  /** Build the superpoint graph of the current cloud in the worker and colour the view. */
+  async function computeGroups(overrides = {}) {
+    if (!cloud || !cloud.count) {
+      ui.setStatus("Carga una escena antes de calcular grupos", "err");
+      return null;
+    }
+    if (groups.computing) throw new Error("ya se está calculando el grafo");
+    const options = { ...graphOptionsFromUi(), ...overrides };
+    groups.computing = true;
+    grpEl.compute.disabled = true;
+    setGroupStatus(`Calculando grafo kNN (k=${options.k}) de ${formatCount(cloud.count)} gaussianas…`);
+    const t0 = performance.now();
+    const generation = cloud;
+    try {
+      const worker = getGraphWorker();
+      const id = ++groups.jobId;
+      const colors = shDcToRgb(cloud.sh, cloud.count);
+      const gaussians = cloud.gaussians.slice(); // the worker takes ownership of this copy
+      const result = await new Promise((resolve, reject) => {
+        groups.pending = { id, resolve, reject };
+        worker.postMessage({ id, type: "build", gaussians, colors, options }, [gaussians.buffer, colors.buffer]);
+      });
+      if (cloud !== generation) throw new Error("la escena cambió durante el cálculo");
+      applyGroups(result, performance.now() - t0);
+      return summarizeGroups();
+    } catch (err) {
+      setGroupStatus(`Grafo fallido: ${err.message}`, "err");
+      console.error("[grupos]", err);
+      throw err;
+    } finally {
+      groups.computing = false;
+      grpEl.compute.disabled = false;
+    }
+  }
+
+  /** Turn superpoint `group` (1-based id) into an F1 instance and select it; returns the label (0 = failed). */
+  function promoteGroup(group, index = -1) {
+    if (!groups.result || !Number.isInteger(group) || group <= 0 || group > groups.result.superpointCount) return 0;
+    let label = groups.instanceOfGroup.get(group);
+    if (!label) {
+      const labels = renderer.getLabels();
+      let max = 0;
+      for (let i = 0; i < labels.length; i++) if (labels[i] > max) max = labels[i];
+      label = max + 1;
+      if (label >= MAX_INSTANCES) {
+        ui.setStatus(`Sin espacio para más instancias (máximo ${MAX_INSTANCES - 1})`, "err");
+        return 0;
+      }
+      const indices = indicesOfGroup(groups.result.superpoint, group - 1);
+      renderer.setLabel(indices, label);
+      renderer.setInstance(label, { tint: [...groupColor(group), 0] });
+      panel.register(label, `grupo ${group}`, indices.length);
+      groups.instanceOfGroup.set(group, label);
+      console.info(`[grupos] grupo ${group} → instancia ${label} (${indices.length} gaussianas)`);
+    }
+    panel.select(label, index);
+    return label;
+  }
+
+  /** Weighted-majority diffusion of the current instance labels over the graph. */
+  function diffuseInstanceLabels(iterations = 5) {
+    const r = groups.result;
+    if (!r) {
+      ui.setStatus("Calcula los grupos antes de difundir etiquetas", "err");
+      return null;
+    }
+    const before = renderer.getLabels();
+    const after = diffuseLabels(before, r.csr, r.csr.weights, { iterations });
+    let changed = 0;
+    for (let i = 0; i < after.length; i++) if (after[i] !== before[i]) changed++;
+    renderer.setLabels(after);
+    panel.refreshCounts(after);
+    ui.setStatus(`Difusión de etiquetas: ${formatCount(changed)} gaussianas cambiadas (${iterations} iteraciones)`, "ok");
+    return changed;
+  }
+
+  grpEl.compute.addEventListener("click", () => computeGroups().catch(() => {}));
+  grpEl.view.addEventListener("click", () => setGroupView(!isGroupView()));
+  grpEl.diffuse.addEventListener("click", () => diffuseInstanceLabels());
+  $("color-mode").addEventListener("change", () => grpEl.view.classList.toggle("active", isGroupView()));
+
+  window.__gsGroups = {
+    compute: (options) => computeGroups(options),
+    get result() {
+      return summarizeGroups();
+    },
+    get view() {
+      return isGroupView();
+    },
+    setView: (on) => setGroupView(on),
+    groupOf: (index) => renderer.groupOf(index),
+    superpointOf: (index) => (groups.result ? groups.result.superpoint[index] : null),
+    promote: (group, index = -1) => promoteGroup(group, index),
+    diffuse: (iterations) => diffuseInstanceLabels(iterations),
+    groupColor: (group) => groupColor(group),
+  };
 
   worker.onmessage = (e) => {
     const msg = e.data;
@@ -594,7 +825,9 @@ async function main() {
     const compression = Number($("compression").value);
     const result = await parseBuffer(buffer, name, compression);
     renderer.setCloud(result.gaussians, result.sh, result.shDegree || 0);
+    cloud = { gaussians: result.gaussians, sh: result.sh, shDegree: result.shDegree || 0, count: result.count };
     panel.reset();
+    resetGroups();
     camera.fit(result.bounds);
     const decoder = result.decoder === "gaussforge" ? "GaussForge" : "built-in";
     const degree = result.shDegree || 0;
@@ -638,12 +871,18 @@ async function main() {
 
   /** Build the two-sphere scene on the CPU and register its instances (labels 1 and 2). */
   function loadSynthetic(options = {}) {
+    // applyLabels=false leaves every gaussian as fondo (used to test group → instance promotion)
+    const { applyLabels = true, ...sceneOptions } = options;
     ui.setStatus("Generando escena sintética…");
-    const scene = makeTwoSpheres(options);
+    const scene = makeTwoSpheres(sceneOptions);
     renderer.setCloud(scene.gaussians, scene.sh, scene.shDegree);
+    cloud = { gaussians: scene.gaussians, sh: scene.sh, shDegree: scene.shDegree, count: scene.count };
     panel.reset();
-    renderer.setLabels(scene.labels);
-    panel.fromLabels(scene.labels, scene.names);
+    resetGroups();
+    if (applyLabels) {
+      renderer.setLabels(scene.labels);
+      panel.fromLabels(scene.labels, scene.names);
+    }
     camera.fit(scene.bounds);
     ui.setMeta(`Escena sintética · 2 esferas · SH0 · ${formatCount(scene.count)} gaussianas`);
     ui.setNote(
@@ -961,7 +1200,7 @@ async function main() {
   // ?scene=synthetic loads the two-sphere scene instead of a file.
   if (query.get("scene") === "synthetic") {
     try {
-      loadSynthetic();
+      loadSynthetic({ applyLabels: query.get("labels") !== "0" });
     } catch (err) {
       ui.setStatus(`Escena sintética fallida: ${err.message}`, "err");
     }
