@@ -30,6 +30,9 @@ publish_roots=(
   docs/figures/pipeline-flowchart.png
   docs/figures/demo-potted-plants-pair.png
   docs/figures/segmentation-pipeline.png
+  docs/figures/workflow-alarm-clock-splat.png
+  docs/figures/workflow-alarm-clock-render.jpg
+  docs/figures/workflow-alarm-clock-slicer.png
   docs/open-vocab-3dgs-imagine-pipeline-paper.pdf
 )
 
@@ -52,6 +55,9 @@ required=(
   shared/splat-io.js
   vendor/gaussforge/index.web.js
   splats/alarm_clock_generated.splat
+  docs/figures/workflow-alarm-clock-splat.png
+  docs/figures/workflow-alarm-clock-render.jpg
+  docs/figures/workflow-alarm-clock-slicer.png
 )
 
 for path in "${required[@]}"; do

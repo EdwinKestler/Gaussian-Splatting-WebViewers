@@ -15,3 +15,4 @@
 | [figures/pipeline-flowchart.png](figures/pipeline-flowchart.png) | Figure 1 (tagging + Imagine cards) |
 | [figures/segmentation-pipeline.png](figures/segmentation-pipeline.png) | Figure 3: segmentation, editing and meshing pipeline (plan F0–F6); source `figures/segmentation-pipeline.mmd`, rendered with `scripts/render-mermaid.mjs` |
 | [figures/demo-potted-plants-pair.png](figures/demo-potted-plants-pair.png) | Figure 2 (3DGS crop vs Imagine edit) |
+| `figures/workflow-alarm-clock-{splat,render,slicer}.*` | Curated real-run triptych used by the GitHub Pages hero: isolated splat, object render and complete-scene 3MF in Cura |

@@ -4,7 +4,7 @@ The public site is designed for:
 
 <https://edwinkestler.github.io/Gaussian-Splatting-WebViewers/>
 
-The deployment is a static browser build. It includes the landing page, all four viewers, the converter, shared browser modules, vendored GaussForge, the shipped alarm-clock scene, all three paper figures, and the report PDF.
+The deployment is a static browser build. It includes the landing page, all four viewers, the converter, shared browser modules, vendored GaussForge, the shipped alarm-clock scene, all three paper figures, the curated alarm-clock workflow triptych used by the hero, and the report PDF.
 
 It deliberately excludes:
 
@@ -12,7 +12,7 @@ It deliberately excludes:
 - `semantic_sidecar/` and its Python runtime;
 - Project Memory and repository-only automation;
 - local `models/` and `vendor/ml/` weights;
-- generated captures, exports, meshes, test reports, and other artifacts;
+- generated captures other than the three explicitly curated hero images, exports, meshes, test reports, and other artifacts;
 - untracked local PLY/SPLAT scenes.
 
 The allowlist is implemented by `scripts/build-pages.sh`. It obtains file names from `git ls-files`, so ignored or untracked local data cannot enter the Pages artifact accidentally.

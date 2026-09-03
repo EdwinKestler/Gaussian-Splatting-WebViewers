@@ -239,73 +239,23 @@
       font-size: 12px;
     }
 
-    .scene-card {
+    .workflow-showcase {
       position: relative;
       min-height: 500px;
       overflow: hidden;
+      margin: 0;
+      padding: 18px;
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) auto;
+      gap: 12px;
       border: 1px solid var(--line-strong);
       border-radius: 32px;
-      background:
-        linear-gradient(180deg, rgba(4, 10, 9, 0.08), rgba(4, 10, 9, 0.76)),
-        radial-gradient(circle at 32% 35%, rgba(214, 255, 127, 0.32), transparent 10rem),
-        radial-gradient(circle at 68% 58%, rgba(124, 183, 255, 0.28), transparent 12rem),
-        #0b1916;
+      background: #0b1916;
       box-shadow: var(--shadow);
-      isolation: isolate;
     }
 
-    .scene-grid {
-      position: absolute;
-      inset: 0;
-      background-image:
-        linear-gradient(rgba(180, 255, 225, 0.055) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(180, 255, 225, 0.055) 1px, transparent 1px);
-      background-size: 36px 36px;
-      transform: perspective(520px) rotateX(62deg) scale(1.4) translateY(32%);
-      transform-origin: bottom;
-      mask-image: linear-gradient(to top, #000, transparent 78%);
-    }
-
-    .splat {
-      position: absolute;
-      border-radius: 50%;
-      filter: blur(0.2px);
-      mix-blend-mode: screen;
-      animation: drift 7s ease-in-out infinite alternate;
-    }
-
-    .splat-a {
-      width: 250px;
-      height: 250px;
-      left: 10%;
-      top: 16%;
-      background:
-        radial-gradient(circle at 42% 35%, #f4ffbd 0 2%, transparent 3%),
-        radial-gradient(circle at 64% 52%, #75f0c6 0 1.8%, transparent 3%),
-        radial-gradient(circle at 38% 66%, #29c997 0 1.5%, transparent 3%),
-        repeating-radial-gradient(circle, rgba(117, 240, 198, 0.78) 0 1.4px, transparent 2.3px 8px);
-      box-shadow: 0 0 78px rgba(117, 240, 198, 0.26);
-    }
-
-    .splat-b {
-      width: 205px;
-      height: 205px;
-      right: 8%;
-      top: 38%;
-      animation-delay: -3s;
-      background:
-        radial-gradient(circle at 34% 38%, #e1f0ff 0 2%, transparent 3%),
-        radial-gradient(circle at 65% 63%, #7cb7ff 0 1.8%, transparent 3%),
-        repeating-radial-gradient(circle, rgba(124, 183, 255, 0.72) 0 1.3px, transparent 2.2px 7px);
-      box-shadow: 0 0 72px rgba(124, 183, 255, 0.23);
-    }
-
-    .scene-topbar,
-    .scene-caption {
-      position: absolute;
-      left: 20px;
-      right: 20px;
-      z-index: 2;
+    .workflow-head,
+    .workflow-caption {
       display: flex;
       justify-content: space-between;
       align-items: center;
@@ -314,22 +264,13 @@
       font-size: 12px;
     }
 
-    .scene-topbar {
-      top: 18px;
-    }
-
-    .scene-caption {
-      bottom: 18px;
-      align-items: flex-end;
-    }
-
-    .live-dot {
+    .workflow-live {
       display: inline-flex;
       align-items: center;
       gap: 7px;
     }
 
-    .live-dot::before {
+    .workflow-live::before {
       content: "";
       width: 7px;
       height: 7px;
@@ -338,17 +279,69 @@
       box-shadow: 0 0 14px var(--mint);
     }
 
-    .hud {
+    .workflow-gallery {
+      min-height: 0;
       display: grid;
-      gap: 7px;
-      text-align: right;
-      color: var(--muted);
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-rows: minmax(0, 1.35fr) minmax(0, 1fr);
+      gap: 10px;
     }
 
-    .hud strong {
+    .workflow-shot {
+      position: relative;
+      min-height: 0;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.34);
+      background: #08090b;
+    }
+
+    .workflow-shot:first-child {
+      grid-column: 1 / -1;
+    }
+
+    .workflow-shot img {
+      width: 100%;
+      height: 100%;
+      display: block;
+      object-fit: cover;
+    }
+
+    .workflow-shot--splat img {
+      object-position: center 48%;
+    }
+
+    .workflow-shot--slicer img {
+      object-position: 48% center;
+    }
+
+    .workflow-stage {
+      position: absolute;
+      left: 10px;
+      bottom: 10px;
+      padding: 6px 8px;
+      background: rgba(8, 9, 11, 0.88);
+      color: #fff;
+      font-size: 11px;
+      font-weight: 850;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      backdrop-filter: blur(8px);
+    }
+
+    .workflow-stage b {
+      margin-right: 6px;
+      color: var(--lime);
+    }
+
+    .workflow-caption {
+      align-items: flex-end;
+    }
+
+    .workflow-caption strong {
       color: var(--text);
-      font-size: 18px;
+      font-size: 16px;
       letter-spacing: -0.03em;
+      text-align: right;
     }
 
     .section {
@@ -590,11 +583,6 @@
       color: var(--text);
     }
 
-    @keyframes drift {
-      from { transform: translate3d(-5px, 4px, 0) rotate(-2deg); }
-      to { transform: translate3d(10px, -8px, 0) rotate(3deg); }
-    }
-
     @media (max-width: 900px) {
       .hero,
       .pipeline-panel {
@@ -605,7 +593,7 @@
         padding-top: 68px;
       }
 
-      .scene-card {
+      .workflow-showcase {
         min-height: 430px;
       }
 
@@ -644,18 +632,8 @@
         font-size: clamp(42px, 14vw, 62px);
       }
 
-      .scene-card {
+      .workflow-showcase {
         min-height: 380px;
-      }
-
-      .splat-a {
-        width: 210px;
-        height: 210px;
-      }
-
-      .splat-b {
-        width: 170px;
-        height: 170px;
       }
 
       .viewer-grid,
@@ -854,53 +832,42 @@
       text-transform: uppercase;
     }
 
-    .scene-card {
+    .workflow-showcase {
       min-height: 600px;
       border: 1px solid rgba(255, 255, 255, 0.74);
       border-radius: 2px;
-      background:
-        linear-gradient(rgba(13, 14, 17, 0.1), rgba(13, 14, 17, 0.68)),
-        var(--blue);
+      background: #18171c;
       box-shadow: 20px 20px 0 var(--orange);
     }
 
-    .scene-grid {
-      background-image:
-        linear-gradient(rgba(17, 17, 19, 0.14) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(17, 17, 19, 0.14) 1px, transparent 1px);
-    }
-
-    .splat-a {
-      background:
-        radial-gradient(circle at 42% 35%, #fff 0 2%, transparent 3%),
-        radial-gradient(circle at 64% 52%, var(--lime) 0 1.8%, transparent 3%),
-        radial-gradient(circle at 38% 66%, var(--orange) 0 1.5%, transparent 3%),
-        repeating-radial-gradient(circle, rgba(255, 210, 47, 0.9) 0 1.5px, transparent 2.4px 8px);
-      box-shadow: 0 0 88px rgba(255, 210, 47, 0.34);
-    }
-
-    .splat-b {
-      background:
-        radial-gradient(circle at 34% 38%, #fff 0 2%, transparent 3%),
-        radial-gradient(circle at 65% 63%, var(--mint) 0 1.8%, transparent 3%),
-        repeating-radial-gradient(circle, rgba(45, 225, 209, 0.85) 0 1.4px, transparent 2.2px 7px);
-      box-shadow: 0 0 80px rgba(45, 225, 209, 0.32);
-    }
-
-    .scene-topbar,
-    .scene-caption {
+    .workflow-head,
+    .workflow-caption {
       color: var(--white);
       font-family: "SFMono-Regular", Consolas, monospace;
       text-transform: uppercase;
     }
 
-    .live-dot::before {
+    .workflow-live::before {
       background: var(--lime);
       box-shadow: none;
     }
 
-    .hud,
-    .hud strong {
+    .workflow-shot {
+      border-color: rgba(255, 255, 255, 0.58);
+    }
+
+    .workflow-stage {
+      border: 1px solid var(--ink);
+      background: var(--lime);
+      color: var(--ink);
+      backdrop-filter: none;
+    }
+
+    .workflow-stage b {
+      color: var(--orange);
+    }
+
+    .workflow-caption strong {
       color: var(--white);
     }
 
@@ -1321,7 +1288,7 @@
         min-height: auto;
       }
 
-      .scene-card {
+      .workflow-showcase {
         min-height: 500px;
         box-shadow: 12px 12px 0 var(--orange);
       }
@@ -1378,8 +1345,8 @@
         font-size: clamp(48px, 16vw, 72px);
       }
 
-      .scene-card {
-        min-height: 410px;
+      .workflow-showcase {
+        min-height: 440px;
       }
 
       .fabrication-path,
@@ -1467,19 +1434,30 @@
         </div>
       </div>
 
-      <div class="scene-card" aria-label="Abstract Gaussian splat scene preview">
-        <div class="scene-grid" aria-hidden="true"></div>
-        <div class="splat splat-a" aria-hidden="true"></div>
-        <div class="splat splat-b" aria-hidden="true"></div>
-        <div class="scene-topbar">
-          <span class="live-dot">Browser pipeline</span>
-          <span>WebGPU · GPU sort</span>
+      <figure class="workflow-showcase" aria-labelledby="workflow-preview-caption">
+        <div class="workflow-head">
+          <span class="workflow-live">Actual project run</span>
+          <span>Alarm clock · WebGPU → 3MF</span>
         </div>
-        <div class="scene-caption">
-          <span>Shipped scene<br /><strong>Alarm clock · 8 MB</strong></span>
-          <span class="hud"><span>Output</span><strong>Color · Depth · ID</strong></span>
+        <div class="workflow-gallery">
+          <div class="workflow-shot workflow-shot--splat">
+            <img src="docs/figures/workflow-alarm-clock-splat.png" width="1261" height="905" alt="Isolated red alarm-clock Gaussian-splat render on a black background" decoding="async" fetchpriority="high" />
+            <span class="workflow-stage"><b>01</b> 3DGS splat</span>
+          </div>
+          <div class="workflow-shot workflow-shot--render">
+            <img src="docs/figures/workflow-alarm-clock-render.jpg" width="1024" height="1024" alt="Polished red alarm-clock object render on a white studio background" decoding="async" />
+            <span class="workflow-stage"><b>02</b> Object render</span>
+          </div>
+          <div class="workflow-shot workflow-shot--slicer">
+            <img src="docs/figures/workflow-alarm-clock-slicer.png" width="1292" height="836" alt="Complete alarm-clock scene mesh loaded in Ultimaker Cura for slicing" decoding="async" />
+            <span class="workflow-stage"><b>03</b> 3MF in slicer</span>
+          </div>
         </div>
-      </div>
+        <figcaption class="workflow-caption" id="workflow-preview-caption">
+          <span>One scene · three real stages</span>
+          <strong>Splat → render → slicer</strong>
+        </figcaption>
+      </figure>
     </section>
 
     <div class="ticker" aria-label="Project capabilities">
