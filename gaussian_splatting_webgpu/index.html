@@ -180,6 +180,13 @@
     #grp-panel h2 { margin: 0 0 2px; font-size: 13px; font-weight: 650; }
     #grp-panel button.active { border-color: var(--accent); color: var(--accent); }
     #grp-status { min-height: 1.4em; }
+    #seg-panel { margin: 12px 0 4px; padding-top: 10px; border-top: 1px solid var(--line); }
+    #seg-panel h2 { margin: 0 0 2px; font-size: 13px; font-weight: 650; }
+    #seg-status { min-height: 1.4em; }
+    #seg-status[data-kind="ok"] { color: var(--accent); }
+    #seg-status[data-kind="err"] { color: var(--err); }
+    #grp-status[data-kind="ok"] { color: var(--accent); }
+    #grp-status[data-kind="err"] { color: var(--err); }
     #inst-panel h2 { margin: 0 0 2px; font-size: 13px; font-weight: 650; }
     #inst-panel .inst-hint { margin: 0 0 4px; color: var(--muted); font-size: 11px; }
     #inst-status { margin: 4px 0 6px; min-height: 1.4em; color: var(--accent); font-variant-numeric: tabular-nums; }
@@ -284,6 +291,25 @@
         <button id="grp-diffuse" type="button" disabled>Difundir etiquetas</button>
       </div>
       <div id="grp-status" class="inst-hint">Sin grupos. Calcula el grafo para colorear superpuntos.</div>
+    </section>
+    <section id="seg-panel">
+      <h2>Segmentación</h2>
+      <p class="inst-hint">Levanta máscaras 2D a las gaussianas: K-buffer (α·T por píxel) + asignación FlashSplat + asociación entre vistas por superpuntos + difusión en el grafo. Exporta <code>instancias.json</code> y <code>etiquetas.u32</code>.</p>
+      <label>Vistas <input id="seg-views" type="range" min="1" max="12" step="1" value="6" /><span class="val"></span></label>
+      <label>Sesgo fondo <input id="seg-bias" type="range" min="0" max="1" step="0.05" value="0.3" /><span class="val"></span></label>
+      <label>Fuente
+        <select id="seg-source">
+          <option value="prueba">Etiquetas actuales (prueba)</option>
+          <option value="sidecar-cajas">Sidecar: cajas de Grok</option>
+          <option value="sidecar-sam">Sidecar: SAM</option>
+        </select>
+        <span></span>
+      </label>
+      <div class="btns">
+        <button id="seg-lift" type="button">Levantar máscaras</button>
+        <button id="seg-export" type="button" disabled>Exportar instancias</button>
+      </div>
+      <div id="seg-status" class="inst-hint">Sin segmentación. Elige una fuente de máscaras y pulsa «Levantar máscaras».</div>
     </section>
     <div class="btns">
       <button id="sem-analyze" type="button">Tag scene (Grok)</button>

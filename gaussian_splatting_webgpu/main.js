@@ -1,4 +1,5 @@
-import { WebGPUSplatRenderer, MAX_INSTANCES } from "./gpu-renderer.js";
+import { WebGPUSplatRenderer, MAX_INSTANCES, OUTPUT_MODE } from "./gpu-renderer.js";
+import { buildInstancesJson, labelsToBytes, liftViews } from "../shared/lift.js";
 import { diffuseLabels, groupColor, indicesOfGroup, shDcToRgb } from "../shared/graph.js";
 import { labelColor } from "../shared/instances.js";
 import { makeTwoSpheres } from "../shared/synthetic.js";
@@ -799,6 +800,297 @@ async function main() {
     promote: (group, index = -1) => promoteGroup(group, index),
     diffuse: (iterations) => diffuseInstanceLabels(iterations),
     groupColor: (group) => groupColor(group),
+  };
+
+  // ------------------------------------------------------ Segmentación (F3)
+
+  const segEl = {
+    views: $("seg-views"),
+    bias: $("seg-bias"),
+    source: $("seg-source"),
+    lift: $("seg-lift"),
+    export: $("seg-export"),
+    status: $("seg-status"),
+  };
+  /** Last lift: labels applied, names, per-view metadata (for instancias.json). */
+  const seg = { last: null, running: false };
+  const SEG_K = 16;
+  const SEG_MAX_EDGE = 640;
+  const SEG_PITCH = 0.45;
+
+  function setSegStatus(text, kind = "") {
+    segEl.status.textContent = text;
+    segEl.status.dataset.kind = kind;
+  }
+
+  /** Mask resolution: the canvas aspect at ≤ SEG_MAX_EDGE px on the long edge. */
+  function maskSize() {
+    const w = canvas.width || 512;
+    const h = canvas.height || 384;
+    const scale = Math.min(1, SEG_MAX_EDGE / Math.max(w, h));
+    return [Math.max(64, Math.round(w * scale)), Math.max(64, Math.round(h * scale))];
+  }
+
+  /** Push the orbit camera to the renderer (same maths as the frame loop). */
+  function pushCamera() {
+    resize();
+    const aspect = canvas.width / canvas.height;
+    const proj = perspective(camera.fov, aspect, camera.near, camera.far);
+    const view = lookAt(camera.eye(), camera.target, camera.up());
+    const fy = canvas.height / (2 * Math.tan(camera.fov / 2));
+    renderer.setCamera(proj, view, [fy, fy], [canvas.width, canvas.height], camera.eye());
+    lastFrame = { proj, view, width: canvas.width, height: canvas.height };
+  }
+
+  /** View v of n: yaw around the target, pitch alternating ±SEG_PITCH so poles get covered. */
+  function applyOrbitView(v, n, saved) {
+    camera.yaw = saved.yaw + (v * 2 * Math.PI) / n;
+    camera.pitch = n > 1 ? (v % 2 ? -SEG_PITCH : SEG_PITCH) : saved.pitch;
+    camera.dampYaw = camera.dampPitch = camera.dampPanX = camera.dampPanY = camera.dampZoom = 0;
+    pushCamera();
+  }
+
+  /** Test source: the current labels seen through the ID pass, with a per-view cyclic id shift. */
+  async function maskFromCurrentLabels(W, H, shift) {
+    const labels = renderer.getLabels();
+    let maxLabel = 0;
+    for (let i = 0; i < labels.length; i++) if (labels[i] > maxLabel) maxLabel = labels[i];
+    if (!maxLabel) throw new Error("la fuente «prueba» necesita instancias etiquetadas (escena sintética o grupos promovidos)");
+    const perm = (l) => (l ? ((l - 1 + shift) % maxLabel) + 1 : 0);
+    const id = await renderer.renderOffscreen({ mode: OUTPUT_MODE.ID, width: W, height: H });
+    const mask = new Uint32Array(W * H);
+    for (let p = 0; p < mask.length; p++) {
+      const g = id.data[p];
+      if (g) mask[p] = perm(labels[g - 1]);
+    }
+    const names = [];
+    for (let l = 1; l <= maxLabel; l++) names[perm(l)] = panel.nameOf(l);
+    return { mask, labelCount: maxLabel + 1, names };
+  }
+
+  async function rgbaToPngB64(rgba, W, H) {
+    const c = document.createElement("canvas");
+    c.width = W;
+    c.height = H;
+    const ctx = c.getContext("2d");
+    const img = ctx.createImageData(W, H);
+    img.data.set(rgba);
+    ctx.putImageData(img, 0, 0);
+    const blob = await new Promise((resolve, reject) => c.toBlob((b) => (b ? resolve(b) : reject(new Error("PNG encode failed"))), "image/png"));
+    return blobToB64(blob);
+  }
+
+  /** 8-bit label PNG from the sidecar → Uint32Array mask. */
+  async function decodeMaskPng(b64, W, H) {
+    const blob = await (await fetch(`data:image/png;base64,${b64}`)).blob();
+    const bmp = await createImageBitmap(blob, { colorSpaceConversion: "none", premultiplyAlpha: "none" });
+    if (bmp.width !== W || bmp.height !== H) throw new Error(`máscara ${bmp.width}x${bmp.height} no coincide con la vista ${W}x${H}`);
+    const c = document.createElement("canvas");
+    c.width = W;
+    c.height = H;
+    const ctx = c.getContext("2d", { willReadFrequently: true });
+    ctx.drawImage(bmp, 0, 0);
+    const d = ctx.getImageData(0, 0, W, H).data;
+    const mask = new Uint32Array(W * H);
+    let max = 0;
+    for (let p = 0; p < mask.length; p++) {
+      const v = d[p * 4];
+      mask[p] = v;
+      if (v > max) max = v;
+    }
+    return { mask, labelCount: max + 1 };
+  }
+
+  /** Capture n orbit views as PNG and ask the sidecar for label masks. */
+  async function masksFromSidecar(n, W, H, saved, backend) {
+    const captures = [];
+    for (let v = 0; v < n; v++) {
+      applyOrbitView(v, n, saved);
+      setSegStatus(`Capturando vista ${v + 1}/${n} para el sidecar…`);
+      const col = await renderer.renderOffscreen({ mode: OUTPUT_MODE.COLOR, width: W, height: H, clearColor: [0, 0, 0, 1] });
+      captures.push({ png_b64: await rgbaToPngB64(col.data, W, H), width: W, height: H });
+    }
+    const health = await fetch(`${SIDECAR_URL}/health`);
+    if (!health.ok) throw new Error(`sidecar HTTP ${health.status}`);
+    setSegStatus(`Pidiendo máscaras (${backend}) al sidecar para ${n} vistas…`);
+    const res = await fetch(`${SIDECAR_URL}/segment`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ views: captures, backend }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || `segment ${res.status}`);
+    const out = [];
+    for (let v = 0; v < n; v++) {
+      const view = data.views[v];
+      const m = await decodeMaskPng(view.mask_png_b64, W, H);
+      m.names = [];
+      for (const o of view.objects || []) m.names[o.id] = o.name;
+      out.push(m);
+    }
+    return out;
+  }
+
+  /**
+   * Lift 2D masks from n orbit views to per-gaussian instance labels:
+   * K-buffer contributions → FlashSplat → superpoint association → diffusion.
+   */
+  async function liftMasks(options = {}) {
+    if (!cloud || !cloud.count) {
+      ui.setStatus("Carga una escena antes de levantar máscaras", "err");
+      return null;
+    }
+    if (seg.running) throw new Error("ya hay un levantamiento en curso");
+    const source = options.source || segEl.source.value;
+    const n = Math.max(1, Math.min(12, Number(options.views ?? segEl.views.value) || 1));
+    const bias = options.backgroundBias ?? Number(segEl.bias.value);
+    const iterations = options.diffusion ?? 5;
+    seg.running = true;
+    segEl.lift.disabled = true;
+    freezeFrame = true;
+    const saved = { yaw: camera.yaw, pitch: camera.pitch, radius: camera.radius };
+    const t0 = performance.now();
+    try {
+      if (!groups.result) {
+        setSegStatus("Calculando superpuntos (F2) para asociar las vistas…");
+        await computeGroups();
+        setGroupView(false);
+      }
+      const [W, H] = maskSize();
+      let sidecarMasks = null;
+      if (source !== "prueba") {
+        sidecarMasks = await masksFromSidecar(n, W, H, saved, source === "sidecar-sam" ? "sam" : "grok-boxes");
+      }
+      const views = [];
+      const viewMeta = [];
+      for (let v = 0; v < n; v++) {
+        applyOrbitView(v, n, saved);
+        const m = sidecarMasks ? sidecarMasks[v] : await maskFromCurrentLabels(W, H, v);
+        setSegStatus(`Levantando vista ${v + 1}/${n} (${m.labelCount - 1} máscaras, ${W}×${H})…`);
+        const c = await renderer.renderContributions({ mask: m.mask, width: W, height: H, labelCount: m.labelCount, k: SEG_K });
+        views.push({ contrib: c.contrib, labelCount: m.labelCount, names: m.names || [] });
+        viewMeta.push({ indice: v, yaw: camera.yaw, pitch: camera.pitch, eye: camera.eye(), mascaras: m.labelCount - 1, chunks: c.chunks, splits: c.splits, instancias: [] });
+      }
+      setSegStatus("Asignando etiquetas (FlashSplat) y asociando vistas…");
+      const lift = liftViews(views, { count: cloud.count, superpoint: groups.result.superpoint, backgroundBias: bias });
+      lift.association.members.forEach((list, k) => {
+        for (const [vi] of list) if (!viewMeta[vi].instancias.includes(k + 1)) viewMeta[vi].instancias.push(k + 1);
+      });
+      let labels = lift.labels;
+      let changed = 0;
+      if (iterations > 0) {
+        const d = diffuseLabels(labels, groups.result.csr, groups.result.csr.weights, { iterations });
+        for (let i = 0; i < d.length; i++) if (d[i] !== labels[i]) changed++;
+        labels = d;
+      }
+      panel.reset();
+      renderer.setLabels(labels);
+      const names = {};
+      lift.names.forEach((nm, g) => {
+        if (g > 0) names[g] = nm;
+      });
+      panel.fromLabels(labels, names);
+      const ms = performance.now() - t0;
+      seg.last = { source, views: viewMeta, bias, iterations, changed, k: SEG_K, width: W, height: H, ms, globalCount: lift.globalCount, names: lift.names, merges: lift.association.pairs.length };
+      segEl.export.disabled = false;
+      setSegStatus(
+        `${formatCount(lift.globalCount)} instancias · ${n} vistas · ${lift.association.pairs.length} fusiones · ` +
+          `${formatCount(changed)} etiquetas corregidas por difusión · ${ms.toFixed(0)} ms`,
+        "ok"
+      );
+      console.info(`[segmentación] ${lift.globalCount} instancias desde ${n} vistas en ${ms.toFixed(0)} ms`, seg.last);
+      return summarizeSeg();
+    } catch (err) {
+      setSegStatus(`Levantamiento fallido: ${err.message}`, "err");
+      console.error("[segmentación]", err);
+      throw err;
+    } finally {
+      camera.yaw = saved.yaw;
+      camera.pitch = saved.pitch;
+      camera.radius = saved.radius;
+      pushCamera();
+      freezeFrame = false;
+      seg.running = false;
+      segEl.lift.disabled = false;
+    }
+  }
+
+  function summarizeSeg() {
+    const l = seg.last;
+    if (!l) return null;
+    return { ...l, names: l.names.slice(), views: l.views.map((v) => ({ ...v })) };
+  }
+
+  /** instancias.json + etiquetas.u32 for the current labels (plan §3.3). */
+  function buildSegmentationExport() {
+    const l = seg.last;
+    if (!l) throw new Error("no hay segmentación que exportar");
+    const labels = renderer.getLabels();
+    const names = l.names.map((nm) => (nm ? { nombre: nm, nombre_es: nm } : ""));
+    const colors = [];
+    for (let g = 1; g < l.names.length; g++) colors[g] = labelColor(g).map((v) => Math.round(v * 255));
+    const info = window.__gsViewer || {};
+    const json = buildInstancesJson({
+      escena: info.name || "escena",
+      fecha: new Date().toISOString(),
+      fuente: { formato: info.format || "", sh_grado: cloud ? cloud.shDegree : 0 },
+      metodo: { mascaras: l.source, sesgo_fondo: l.bias, umbral_iou: 0.5, difusion_iter: l.iterations, k_buffer: l.k },
+      labels,
+      gaussians: cloud ? cloud.gaussians : null,
+      names,
+      colors,
+      views: l.views.map((v) => ({ indice: v.indice, instancias: v.instancias })),
+    });
+    return { json, bytes: labelsToBytes(labels) };
+  }
+
+  function downloadBlob(blob, name) {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  /** Download instancias.json + etiquetas.u32 and, when the sidecar answers, save them under artifacts/. */
+  async function exportSegmentation({ download = true, save = true } = {}) {
+    const { json, bytes } = buildSegmentationExport();
+    if (download) {
+      downloadBlob(new Blob([JSON.stringify(json, null, 2)], { type: "application/json" }), "instancias.json");
+      downloadBlob(new Blob([bytes], { type: "application/octet-stream" }), "etiquetas.u32");
+    }
+    let saved = null;
+    if (save) {
+      try {
+        const res = await fetch(`${SIDECAR_URL}/segmentaciones`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ escena: json.escena, instancias: json, etiquetas_b64: await blobToB64(new Blob([bytes])) }),
+        });
+        const data = await res.json();
+        if (res.ok && data.ok) saved = data;
+      } catch (err) {
+        console.info("[segmentación] sidecar no disponible para guardar en artifacts/:", err.message);
+      }
+    }
+    setSegStatus(
+      `Exportadas ${json.n_instancias} instancias (${formatCount(json.fuente.n_gaussianas)} etiquetas)` +
+        (saved ? ` · guardado en ${saved.carpeta}` : " · descarga local (sidecar no disponible)"),
+      "ok"
+    );
+    return { json, saved };
+  }
+
+  segEl.lift.addEventListener("click", () => liftMasks().catch(() => {}));
+  segEl.export.addEventListener("click", () => exportSegmentation().catch((err) => setSegStatus(`Exportación fallida: ${err.message}`, "err")));
+
+  window.__gsSegment = {
+    lift: (options) => liftMasks(options),
+    export: (options) => exportSegmentation(options),
+    build: () => buildSegmentationExport(),
+    get last() {
+      return summarizeSeg();
+    },
   };
 
   worker.onmessage = (e) => {

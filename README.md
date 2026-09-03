@@ -99,7 +99,8 @@ Shared parser: `shared/splat-io.js`. WebGL viewers still pack to 32-byte rows. T
 - **Identity layer (plan F1):** a `u32` label per Gaussian plus an instance table (rigid transform, tint, visible/selected) in the shader; output modes colour / depth / normal / ID with `renderOffscreen()` readback and `pick(x, y)`; HUD panel **Instancias** (click selects, *Aislar* / *Ocultar* / *Teñir*, `Escena sintética (2 esferas)`)
 - `?offscreen=1` skips the canvas context (headless SwiftShader tests); `selftest.html` renders offscreen and reports `SELFTEST_OK`
 - `?scene=synthetic` loads the deterministic two-sphere scene from `shared/synthetic.js` (labels 1 = esfera A, 2 = esfera B) used by the F1 acceptance tests
-- Depth mode returns the alpha-weighted *mean* view distance for now; the 2DGS median depth arrives with the K-buffer resolve (plan F3)
+- `renderOffscreen({ mode: 1 })` returns the alpha-weighted *mean* view distance; `renderContributions()` returns the exact 2DGS *median* depth (`medianDepth`) from the K-buffer
+- **Mask lifting (plan F3):** `gaussian_splatting_webgpu/contrib-pass.js` is a K-buffer pass that accumulates per-Gaussian α·T mass per 2D mask label (exact: the depth-sorted list is drawn in chunks that split on overflow) and resolves the 2DGS *median* depth; `shared/lift.js` does the closed-form FlashSplat assignment, Gaga-style cross-view association over F2 superpoints, and the `instancias.json` / `etiquetas.u32` export. HUD panel **Segmentación**: views, background bias, mask source (*Etiquetas actuales (prueba)*, *Sidecar: cajas de Grok*, *Sidecar: SAM*), *Levantar máscaras*, *Exportar instancias*. Sidecar endpoints `/segment` and `/segmentaciones` (saves under `artifacts/segmentaciones/`)
 - **Superpoint graph (plan F2):** `shared/graph.js` (pure JS, runs in `shared/graph-worker.js`) builds a kNN graph (k = 10, hash grid), weights edges with the symmetric Mahalanobis distance and the SH0 colour, cuts weak edges and labels connected components as superpoints; HUD panel **Grupos** (*Calcular grupos*, *Vista Grupos* = colour mode «Grupos», *Difundir etiquetas*); with the Grupos view active a click promotes the superpoint to an F1 instance. `?scene=synthetic&labels=0` loads the spheres without labels. Benchmark: `node scripts/bench-graph.mjs 1000000`
 
 **Point cloud debug** is a diagnostic overlay. Leave it unchecked for the radiance-field rendering.
@@ -112,8 +113,8 @@ Optional **open-vocab tags** and **Imagine 2.0 object cards**: start `./semantic
 
 ```bash
 npm install          # @playwright/test 1.56.1 (browsers are not downloaded)
-npm test             # 66 Node unit tests for shared/splat-io.js and shared/graph.js
-npm run test:e2e     # 12 Playwright tests on Chromium WebGPU (SwiftShader when no GPU), offscreen rendering only
+npm test             # 79 Node unit tests for shared/splat-io.js, shared/graph.js and shared/lift.js
+npm run test:e2e     # 16 Playwright tests on Chromium WebGPU (SwiftShader when no GPU), offscreen rendering only
 ```
 
 Details, GPU flags (`WEBGPU_ARGS`) and the SwiftShader canvas caveat: [docs/testing.md](docs/testing.md). Generated outputs go under `artifacts/` (gitignored).

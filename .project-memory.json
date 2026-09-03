@@ -95,6 +95,16 @@
       "mode": "search",
       "query": "buildSuperpointGraph connectedComponents diffuseLabels kNN Mahalanobis superpoint",
       "expected_paths": ["shared/graph.js"]
+    },
+    {
+      "mode": "search",
+      "query": "assignLabels associateMasks containment liftViews FlashSplat instancias.json",
+      "expected_paths": ["shared/lift.js"]
+    },
+    {
+      "mode": "search",
+      "query": "ContributionPass K-buffer resolve transmittance median depth chunks overflow",
+      "expected_paths": ["gaussian_splatting_webgpu/contrib-pass.js"]
     }
   ]
 }

@@ -600,6 +600,42 @@ fn fs_main(input: VSOut) -> @location(0) vec4<f32> {
 }
 
 // Opaque ID pass: first gaussian with α ≥ threshold wins (depth test 'less').
+// ---- F3 K-buffer (contrib-pass.js): per-pixel list of (gaussian, alpha, depth)
+struct KParams {
+  width: u32,
+  height: u32,
+  k: u32,
+  _pad: u32,
+};
+struct KEntry {
+  index: u32, // gaussian index + 1
+  alpha: f32,
+  depth: f32, // view distance (-cam.z)
+  pad: u32,
+};
+@group(1) @binding(0) var<uniform> k_params: KParams;
+@group(1) @binding(1) var<storage, read_write> k_counts: array<atomic<u32>>;
+@group(1) @binding(2) var<storage, read_write> k_entries: array<KEntry>;
+
+@fragment
+fn fs_contrib(input: VSOut) -> @location(0) vec4<f32> {
+  let alpha = splat_alpha(input);
+  if (alpha < 0.0) {
+    discard;
+  }
+  let px = u32(input.position.x);
+  let py = u32(input.position.y);
+  if (px >= k_params.width || py >= k_params.height) {
+    discard;
+  }
+  let pixel = py * k_params.width + px;
+  let slot = atomicAdd(&k_counts[pixel], 1u);
+  if (slot < k_params.k) {
+    k_entries[pixel * k_params.k + slot] = KEntry(input.v_index, alpha, input.v_aux.w, 0u);
+  }
+  return vec4<f32>(0.0);
+}
+
 @fragment
 fn fs_id(input: VSOut) -> @location(0) u32 {
   let alpha = splat_alpha(input);
@@ -1612,6 +1648,22 @@ export class WebGPUSplatRenderer {
       depth = d.alpha[p] > 0 ? d.data[p] : null;
     }
     return { index, label, group, depth };
+  }
+
+  /**
+   * F3: per-gaussian contribution mass per mask label at the current camera
+   * (K-buffer + FlashSplat input) and the 2DGS median depth. See contrib-pass.js.
+   * @param {{mask:Uint32Array, width:number, height:number, labelCount:number, k?:number}} opts
+   */
+  renderContributions(opts) {
+    if (!this.device) return Promise.reject(new Error("WebGPU is not initialized"));
+    return this._serial(async () => {
+      if (!this._contribPass) {
+        const { ContributionPass } = await import("./contrib-pass.js");
+        this._contribPass = new ContributionPass(this);
+      }
+      return this._contribPass.run(opts);
+    });
   }
 
   /**
