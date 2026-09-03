@@ -27,10 +27,10 @@ scripts/download-ml-models.sh         # optional, once: SAM 2.1 + CLIP weights i
 | 2 Rasterize | Paper 3DGS ellipses (EWA, SH0–3, GPU counting sort) | `gaussian_splatting_webgpu/gpu-renderer.js` |
 | 2b Identity (F1) | Label per Gaussian, instance table (transform, tint, flags), colour / depth / normal / ID readback, `pick()`, `pickRect()`, `pickDisc()` | same, HUD *Instancias* |
 | 2c Superpoints (F2) | kNN + Mahalanobis/colour weights → connected components; group → instance on click; label diffusion | `shared/graph.js` in `graph-worker.js`, HUD *Grupos* |
-| 2d Lift (F3) | K-buffer α·T per mask label → FlashSplat argmax → association over superpoints → diffusion → `instancias.json` + `etiquetas.u32` | `contrib-pass.js`, `shared/lift.js`, HUD *Segmentación*; masks from the current labels (test), sidecar `/segment` (Grok boxes → ellipse masks, or a SAM backend via `SAM_BACKEND`), or SAM 2.1 in the browser (`ml-browser.js`, prompts = projected superpoint centroids, duplicate masks merged) |
+| 2d Lift (F3) | K-buffer α·T per mask label → FlashSplat argmax → reciprocal-best cross-view graph (superpoint containment + direct Gaussian overlap, at most one mask per view) → diffusion → `instancias.json` + `etiquetas.u32` | `contrib-pass.js`, `shared/lift.js`, HUD *Segmentación*; masks from current labels, sidecar `/segment`, or SAM 2.1 in the browser |
 | 2e Name (F4) | Isolated render per instance → sidecar `/name` (Grok VQA, JSON `nombre`/`nombre_es`/`categoria`/`confianza`; `NAME_BACKEND=mock` for tests) → panel + text search + Imagine card per `id_instancia`; optional CLIP ViT-B/32 embeddings per crop in the browser → semantic search + `embedding_clip` in the export | `shared/naming.js`, `ml-browser.js`, HUD *Instancias* |
 | 2f Edit / export (F5) | Selection (rect / brush / sphere / superpoint) → `asignar`; per-instance `transformar` / `duplicar` / `borrar` / `fusionar` / `renombrar` in a replayable `ops.jsonl` with undo; bake transforms → PLY (+`instance_id`, `class_id`, `confidence`), `.splat`, SPZ / compressed PLY via GaussForge | `shared/edit-ops.js`, `shared/export-io.js`, HUD *Edición*, sidecar `/exportaciones` |
-| 2g Mesh (F6) | Isolated instance → orbit cameras → depth (mean or 2DGS median) + colour → TSDF fusion with carving → surface nets → largest component → GLB (normals + vertex colours) | `shared/tsdf.js` in `tsdf-worker.js`, `shared/glb.js`, HUD *Malla*, sidecar `/mallas` |
+| 2g Mesh (F6) | Isolated instance → orbit depth + colour → TSDF fusion → GLB via surface nets, or print path via marching tetrahedra → weld/clean/orient/fill-small-holes → topology gate → millimetre scaling + z=0 → 3MF | `shared/tsdf.js`, `mesh-ops.js`, `glb.js`, `three-mf.js` in a worker/HUD *Malla*; sidecar `/mallas` |
 | 3 Capture | PNG + yaw/pitch/eye | `canvas` snapshot |
 | 4 Tag | Open-vocab names + boxes | `grok-4.6` vision (sidecar `/analyze`) |
 | 5 Cluster | Merge armchair/sofa/seat | name key in sidecar |
@@ -44,7 +44,7 @@ scripts/download-ml-models.sh         # optional, once: SAM 2.1 + CLIP weights i
 3. **Segmentación** → choose the mask source (*SAM 2 (navegador)* needs `vendor/ml/` or network), *Vistas*, *Sesgo fondo* → *Levantar máscaras* → *Exportar instancias* writes `instancias.json` + `etiquetas.u32` (download, and `artifacts/segmentaciones/<escena>/<fecha>/` through the sidecar).
 4. **Instancias** → *Nombrar instancias (Grok)*, *Embeddings CLIP*, search box (tick *Búsqueda semántica* for CLIP), per-row *Aislar / Ocultar / Teñir / Nombrar / Tarjeta / Malla*.
 5. **Edición** → pick a tool (*Rectángulo*, *Pincel*, *Esfera 3D*, *Superpunto*; *Añadir* / *Quitar*) and drag or click on the canvas; *Nueva instancia* / *Añadir a seleccionada* / *Quitar (fondo)*. With an instance selected: move / rotate / scale, *Duplicar*, *Borrar*, *Fusionar con #*, *Renombrar*, *Deshacer* / *Rehacer* (Ctrl+Z). *Exportar* the instance or the visible scene as PLY / .splat / SPZ / compressed PLY; *Guardar ops.jsonl*.
-6. **Malla** → *Vistas*, *Vóxeles*, *Arista*, depth *media* (fast) or *mediana* (K-buffer) → *Malla de la seleccionada* → GLB download and `artifacts/mallas/<escena>/<id>.glb`.
+6. **Malla** → choose views, voxels, render edge and depth. Use **GLB** for coloured inspection/editing. For fabrication choose **3MF**, set the maximum dimension in millimetres, keep repair enabled, and create the file. The status reports `cerrada` only after the topology gate; otherwise 3MF is blocked with boundary/non-manifold counts.
 
 Every panel exposes a scripting API for tests and batch runs: `window.__gsGroups`, `__gsSegment`, `__gsNames`, `__gsEdit`, `__gsMesh`, `__gsLoad`, `__gsRenderer`, `__gsInstances`, `__gsCamera`.
 
@@ -61,7 +61,7 @@ artifacts/
     ops.jsonl                # F5: one edit op per line (optional)
   exportaciones/<escena>/
     instancia-<id>.<ply|splat|spz|compressed.ply>   # or escena.<ext>; <same>.json metadata; ops.jsonl
-  mallas/<escena>/<id>.glb   # + <id>.json (method, vertices, triangles, timings, warning)
+  mallas/<escena>/<id>.<glb|3mf>   # + <id>.json (method, topology, scale, timings, warning)
   test-results/              # Playwright traces
 img_output/<fecha>-<nombre>/imagine.<jpg|png>       # Imagine cards
 vendor/ml/                   # SAM 2.1 + CLIP weights + transformers.js (scripts/download-ml-models.sh)
@@ -82,7 +82,7 @@ vendor/ml/                   # SAM 2.1 + CLIP weights + transformers.js (scripts
 | `POST /name` | `nombre`/`nombre_es`/`categoria`/`confianza` per isolated instance render (`NAME_BACKEND=mock` offline) | grok only |
 | `POST /segmentaciones` | save `instancias.json`, `etiquetas.u32`, `ops.jsonl`, `etiquetas_base.u32` | no |
 | `POST /exportaciones` | save an exported instance / scene file + metadata | no |
-| `POST /mallas` | save a GLB + metadata | no |
+| `POST /mallas` | save a GLB or 3MF + validation/scale metadata | no |
 
 The browser never sees API keys; the sidecar reads `.env`. Everything but Grok naming, tags and Imagine cards works without the sidecar (downloads only).
 

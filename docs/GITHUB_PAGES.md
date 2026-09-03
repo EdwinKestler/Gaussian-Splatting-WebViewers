@@ -29,7 +29,7 @@ Open `http://127.0.0.1:8090/`. The WebGPU viewer should automatically load `spla
 
 ## GitHub configuration
 
-The workflow in `.github/workflows/pages.yml` tests the JavaScript modules, builds the allowlisted artifact, uploads it, and deploys it to the protected `github-pages` environment. The repository must have Pages configured with **GitHub Actions** as its source.
+The workflow in `.github/workflows/pages.yml` checks source/JSON syntax, runs Node unit tests and the default Chromium/WebGPU acceptance suite, builds the allowlisted artifact, uploads it, and deploys it to the protected `github-pages` environment. Browser traces are retained on failure. Pull requests run the same quality gates in `.github/workflows/ci.yml`. The repository must have Pages configured with **GitHub Actions** as its source.
 
 The one-time API equivalent is:
 

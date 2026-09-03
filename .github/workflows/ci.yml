@@ -1,21 +1,18 @@
-name: Deploy GitHub Pages
+name: CI
 
 on:
-  push:
-    branches: [main]
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
-  group: github-pages
-  cancel-in-progress: false
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build:
+  verify:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -37,6 +34,9 @@ jobs:
       - name: Run unit tests
         run: npm test
 
+      - name: Build the exact Pages allowlist
+        run: npm run build:pages
+
       - name: Install Chromium and system dependencies
         run: npx playwright install --with-deps chromium
 
@@ -51,26 +51,3 @@ jobs:
           path: artifacts/test-results
           if-no-files-found: ignore
           retention-days: 7
-
-      - name: Build static Pages artifact
-        run: npm run build:pages
-
-      - name: Configure GitHub Pages
-        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
-
-      - name: Upload GitHub Pages artifact
-        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
-        with:
-          path: _site
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

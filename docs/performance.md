@@ -3,7 +3,7 @@
 `scripts/profile-webgpu.mjs` profiles the shipped alarm-clock scene through the
 same public browser APIs used by the HUD. It records the WebGPU adapter, repeated
 offscreen colour/depth/contribution passes, F2 graph construction and the full
-F6 mesh pipeline. Results are written to the gitignored
+F6 GLB and topology-gated 3MF pipelines. Results are written to the gitignored
 `artifacts/profiles/webgpu-<timestamp>.json`.
 
 ```bash
@@ -14,6 +14,9 @@ __NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia npm run profile:web
 __NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia \
   WEBGPU_PROFILE_SAM=1 WEBGPU_PROFILE_RUNS=3 npm run profile:webgpu
 ```
+
+The 3MF path runs by default at 100 mm. Set `WEBGPU_PROFILE_3MF=0` to omit it or
+`WEBGPU_PROFILE_PRINT_MM=<mm>` to change its requested maximum dimension.
 
 Set `WEBGPU_PROFILE_HEADLESS=1` only on platforms whose Chromium build exposes
 hardware WebGPU headlessly. On the Linux/NVIDIA machine below, headless Vulkan
@@ -43,9 +46,30 @@ Environment:
 | F6 stage split | 182 ms rendering, 628 ms fusion, 74 ms extraction |
 | F6 output | 12,425 vertices, 24,872 triangles, 746,996-byte GLB |
 
-The mesh has Euler characteristic −10, so fast output is not evidence of
-printability. The validation/repair gate must report boundary and non-manifold
-edges before a file is called ready for fabrication.
+The recorded GLB has Euler characteristic −10, so fast output is not evidence of
+printability. Current builds report boundary/non-manifold/winding diagnostics for
+GLB and use a marching-tetrahedra remesh plus repair and a mandatory topology gate
+before emitting 3MF. That gate does not replace wall-thickness, self-intersection,
+slicer or physical-print validation.
+
+### Post-repair profile on the same hardware
+
+After adding topology repair and the 3MF path, a three-run refresh on the same
+adapter measured 6.5 ms median colour, 5.0 ms mean depth, 787.5 ms K-buffer and
+1,917.1 ms graph-worker time. The GLB path completed in 1,125.7 ms (202 ms render,
+625 ms fusion, 271 ms extraction/validation) and produced 12,419 vertices,
+24,918 triangles and 747,332 bytes. Its validator reported 119 boundary and 89
+non-manifold edges after conservative repair, so it is correctly described as a
+view/edit mesh rather than printable geometry.
+
+The 96³ clock 3MF attempt was blocked after 4,822.4 ms because four triangles
+remained below the print-space area threshold. This failure is retained in the
+profile JSON instead of aborting the profiler or weakening the gate. By contrast,
+the deterministic two-sphere browser acceptance at 32³ emits a 0.60 MB 3MF with
+4,472 vertices, 8,940 triangles, zero boundary/non-manifold/winding errors, a
+maximum dimension of exactly 80 mm and its lowest point on z=0. The practical
+next step for the clock is better 2DGS/GOF geometry or a stronger volumetric
+repair backend, not an unchecked 3MF download.
 
 ## SAM 2.1 and association profile
 

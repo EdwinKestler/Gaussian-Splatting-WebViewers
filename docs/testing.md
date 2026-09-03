@@ -41,15 +41,18 @@ presupuesto de tiempo (250 k gaussianas, variable `GRAPH_BUDGET_MS_250K`). El cr
 en < 3 s en un portátil» se mide con `node scripts/bench-graph.mjs 1000000` (`GRAPH_BUDGET_MS`).
 `tests/unit/naming.test.mjs` cubre `shared/naming.js` (encuadre de instancias, búsqueda normalizada, fusión de nombres).
 `tests/unit/lift.test.mjs` cubre `shared/lift.js` con matrices de contribución simuladas: argmax con sesgo de
-fondo, histogramas y contención, asociación con ids permutados y vistas parciales, `liftViews` de extremo a
-extremo (IoU > 0,9) y el esquema de `instancias.json`.
+fondo, histogramas, contención y solapamiento gaussiano, asociación recíproca independiente del orden con ids
+permutados y vistas parciales, `liftViews` de extremo a extremo (IoU > 0,9) y el esquema de `instancias.json`.
+`tests/unit/mesh-ops.test.mjs` valida topología, soldado, orientación, relleno conservador de agujeros,
+escala en milímetros y el paquete OPC/3MF; `tsdf.test.mjs` comprueba además que marching tetrahedra + reparación
+produce una variedad cerrada e imprimible.
 
 ## Pruebas e2e con WebGPU
 
 | Fichero | Cubre |
 | --- | --- |
 | `tests/e2e/smoke.spec.mjs` | Adaptador WebGPU, `splat-io` en el navegador, cómputo + render *offscreen* bajo SwiftShader, `parse-worker.js` con GaussForge vendorizado y el CDN bloqueado (criterio F0 «carga sin red») |
-| `tests/e2e/f6-mesh.spec.mjs` | Aceptación F6 (H4): «Malla» sobre la esfera A → GLB glTF 2.0 válido (POSITION/NORMAL/COLOR_0) con radio medio dentro del margen documentado (±12 %, la profundidad media sobreestima el radio por la extensión de los splats), una sola componente, cámara y aislamiento restaurados, `/mallas` recibe el GLB e `instancias.json` lleva `malla`; esfera B con profundidad mediana (K-buffer) conserva su color naranja |
+| `tests/e2e/f6-mesh.spec.mjs` | Aceptación F6: GLB glTF 2.0 válido con radio/color correctos y estado de topología explícito; ruta 3MF por marching tetrahedra con 0 bordes abiertos, 0 aristas no-manifold, escala exacta de 80 mm, z=0, partes OPC requeridas y persistencia `.3mf`; cámara y aislamiento restaurados; profundidad mediana también cubierta |
 | `tests/e2e/f5-edit.spec.mjs` | Aceptación F5 (sidecar simulado): esfera 3D → nueva instancia, rectángulo en modo «quitar» → fondo, mover una esfera y comprobarlo en el pase ID, duplicar/borrar/deshacer/fusionar/renombrar, exportar una instancia como PLY con `instance_id` (traslación horneada) y la escena como SPZ (GaussForge), recargar el PLY muestra sólo ese objeto con su instancia, reproducir `ops.jsonl` sobre una escena nueva da la misma huella; botones del HUD, Ctrl+Z y exportación sin sidecar |
 | `tests/e2e/f4-ml-browser.spec.mjs` | *Opcional* (`ML_E2E=1` + `scripts/download-ml-models.sh`): SAM 2.1 en el navegador (transformers.js, WASM) levanta las dos esferas en exactamente 2 instancias desde indicaciones de superpuntos, CLIP incrusta los recortes aislados y «an orange ball» / «a blue sphere» eligen la esfera correcta, la exportación lleva `embedding_clip` unitario de 512 d. ≈ 1 min bajo SwiftShader |
 | `tests/e2e/f4-naming.spec.mjs` | Aceptación F4 con el sidecar simulado por `page.route` (sin clave): recorte aislado por instancia (sólo sus gaussianas, fondo blanco, cámara restaurada), `/name` → nombre_es/categoría/confianza en el panel, búsqueda con acentos y selección con Intro, exportación con nombres, tarjeta Imagine ligada a `id_instancia`, error claro sin sidecar |
@@ -114,6 +117,13 @@ Para un perfil reproducible de la escena de demostración (adaptador, color,
 profundidad, K-buffer, grafo y malla), usa `npm run profile:webgpu`. En Linux/NVIDIA
 el perfil es dirigido por defecto porque Chromium headless puede no exponer el
 adaptador Vulkan. Resultados y variables opcionales: [performance.md](performance.md).
+
+## CI
+
+`npm run check` valida sintaxis de los módulos JS/Python propios y parsea los JSON. Los *pull requests*
+ejecutan `check`, las 122 pruebas unitarias, el artefacto allowlist de Pages y las 23 pruebas e2e por
+`.github/workflows/ci.yml`. El despliegue de Pages repite las mismas puertas antes de publicar; si falla
+Playwright conserva trazas durante 7 días.
 
 ## Dónde quedan los resultados
 

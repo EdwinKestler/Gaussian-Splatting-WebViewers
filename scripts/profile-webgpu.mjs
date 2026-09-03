@@ -25,6 +25,8 @@ const meshViews = Math.max(4, Math.min(64, Number(process.env.WEBGPU_PROFILE_MES
 const meshResolution = Math.max(16, Math.min(256, Number(process.env.WEBGPU_PROFILE_MESH_RESOLUTION) || 96));
 const meshEdge = Math.max(64, Math.min(1024, Number(process.env.WEBGPU_PROFILE_MESH_EDGE) || 256));
 const profileSam = process.env.WEBGPU_PROFILE_SAM === "1";
+const profile3mf = process.env.WEBGPU_PROFILE_3MF !== "0";
+const printSizeMm = Math.max(1, Math.min(1000, Number(process.env.WEBGPU_PROFILE_PRINT_MM) || 100));
 const defaultArgs = [
   "--enable-unsafe-webgpu",
   "--ignore-gpu-blocklist",
@@ -71,7 +73,7 @@ try {
   await page.goto(url, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__gsViewer?.count === 262144 && window.__gsRenderer && window.__gsGroups && window.__gsMesh);
 
-  const profile = await page.evaluate(async ({ runs, meshViews, meshResolution, meshEdge, profileSam }) => {
+  const profile = await page.evaluate(async ({ runs, meshViews, meshResolution, meshEdge, profileSam, profile3mf, printSizeMm }) => {
     const adapter = await navigator.gpu.requestAdapter();
     if (!adapter) throw new Error("navigator.gpu exists but requestAdapter() returned null");
     const info = adapter.info || {};
@@ -127,6 +129,26 @@ try {
       download: false,
       save: false,
     });
+    let print3mf = null;
+    if (profile3mf) {
+      const start = performance.now();
+      try {
+        print3mf = await window.__gsMesh.build(1, {
+          views: meshViews,
+          resolution: meshResolution,
+          edge: meshEdge,
+          depth: "media",
+          carve: true,
+          repair: true,
+          format: "3mf",
+          maxDimensionMm: printSizeMm,
+          download: false,
+          save: false,
+        });
+      } catch (error) {
+        print3mf = { error: error.message, failed_ms: performance.now() - start };
+      }
+    }
 
     return {
       captured_at: new Date().toISOString(),
@@ -152,8 +174,23 @@ try {
         stats: mesh.stats,
         stage_ms: mesh.metadatos.tiempos_ms,
       },
+      print_3mf: print3mf && (print3mf.error ? {
+        error: print3mf.error,
+        failed_ms: print3mf.failed_ms,
+        max_dimension_mm: printSizeMm,
+      } : {
+        views: meshViews,
+        resolution: meshResolution,
+        edge: meshEdge,
+        max_dimension_mm: printSizeMm,
+        total_ms: print3mf.ms,
+        bytes: print3mf.bytes,
+        stats: print3mf.stats,
+        stage_ms: print3mf.metadatos.tiempos_ms,
+        print: print3mf.metadatos.impresion,
+      }),
     };
-  }, { runs, meshViews, meshResolution, meshEdge, profileSam });
+  }, { runs, meshViews, meshResolution, meshEdge, profileSam, profile3mf, printSizeMm });
 
   const slug = profile.captured_at.replace(/[:.]/g, "-");
   const output = resolve(root, "artifacts", "profiles", `webgpu-${slug}.json`);

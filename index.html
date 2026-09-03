@@ -1451,8 +1451,8 @@
         <div class="eyebrow">Open WebGPU 3DGS workspace · F0–F6</div>
         <h1 id="hero-title">From <span class="dot-word">splats.</span><br />To <span class="gradient-text">solids.</span></h1>
         <p class="hero-copy">
-          Decode a radiance field, discover its objects, edit them, and reconstruct a GLB mesh—all in one
-          browser lab. Start with the shipped alarm-clock scene; no build step and no scene upload.
+          Decode a radiance field, discover its objects, edit them, and reconstruct a coloured GLB or
+          topology-gated 3MF—all in one browser lab. Start with the shipped alarm-clock scene; no build step and no scene upload.
         </p>
         <div class="actions">
           <a class="button button-primary" href="gaussian_splatting_webgpu/index.html">
@@ -1484,8 +1484,8 @@
 
     <div class="ticker" aria-label="Project capabilities">
       <div class="ticker-track" aria-hidden="true">
-        <span>WebGPU rasterizer</span><span>Six Gaussian formats</span><span>Per-Gaussian identity</span><span>TSDF mesh</span><span>GLB export</span><span>Browser local</span>
-        <span>WebGPU rasterizer</span><span>Six Gaussian formats</span><span>Per-Gaussian identity</span><span>TSDF mesh</span><span>GLB export</span><span>Browser local</span>
+        <span>WebGPU rasterizer</span><span>Six Gaussian formats</span><span>Reciprocal mask lift</span><span>TSDF mesh</span><span>GLB + 3MF</span><span>Browser local</span>
+        <span>WebGPU rasterizer</span><span>Six Gaussian formats</span><span>Reciprocal mask lift</span><span>TSDF mesh</span><span>GLB + 3MF</span><span>Browser local</span>
       </div>
     </div>
 
@@ -1511,7 +1511,7 @@
         <article class="card" style="--card-accent: var(--lime)">
           <span class="card-number">03</span>
           <h3>Edit & deliver</h3>
-          <p>Select, transform, duplicate, hide, merge, and rename objects with a replayable operation log. Export PLY, SPLAT, SPZ, compressed PLY, or a GLB mesh.</p>
+          <p>Select, transform, duplicate, hide, merge, and rename objects with a replayable operation log. Export Gaussian formats, a coloured GLB, or a checked 3MF in millimetres.</p>
         </article>
       </div>
     </section>
@@ -1526,15 +1526,15 @@
           <div class="section-kicker">02 / F0–F6 architecture</div>
           <h2 class="section-heading" id="pipeline-title">A traceable object pipeline.</h2>
           <p class="section-intro">
-            Every stage has a concrete browser module, deterministic test fixtures, and exportable artifacts.
+            Every stage has a concrete browser module, deterministic test fixtures, exportable artifacts, and deployment gates.
           </p>
           <ol class="pipeline-list">
             <li><span><strong>Decode</strong> into 12-float Gaussians plus SH coefficients.</span></li>
             <li><span><strong>Rasterize</strong> color, depth, normal, ID, and contribution buffers.</span></li>
             <li><span><strong>Group</strong> Gaussians into graph-based superpoints.</span></li>
-            <li><span><strong>Lift</strong> masks across views into persistent 3D instances.</span></li>
+            <li><span><strong>Lift</strong> masks with reciprocal superpoint and direct-Gaussian overlap evidence.</span></li>
             <li><span><strong>Name and edit</strong> with undoable, replayable operations.</span></li>
-            <li><span><strong>Export or mesh</strong> the selected object or visible scene.</span></li>
+            <li><span><strong>Export or mesh</strong> as Gaussian data, GLB, or topology-gated 3MF.</span></li>
           </ol>
         </div>
       </div>
@@ -1574,8 +1574,8 @@
             <h2 class="print-title" id="fabrication-title">Splat.<br />Mesh.<br />Print.</h2>
           </div>
           <p class="print-summary">
-            Yes—the lab makes the practical case from a Gaussian scene to a mesh-shaped GLB. A slicer-ready
-            print still needs a short external preparation step, so the boundary is explicit.
+            The browser now implements the path from a Gaussian instance to a repaired, millimetre-scale 3MF.
+            It blocks files that fail its topology gate; slicer and physical-process validation remain external.
           </p>
         </div>
 
@@ -1588,31 +1588,31 @@
           <article class="fabrication-step">
             <span class="step-id">02 / Reconstruct</span>
             <h3>Depth to surface</h3>
-            <p>Orbit cameras render depth and colour. TSDF fusion, empty-space carving, and surface nets recover a connected mesh.</p>
+            <p>Orbit cameras render depth and colour. TSDF fusion feeds fast surface nets for GLB or marching tetrahedra for printing.</p>
           </article>
           <article class="fabrication-step">
-            <span class="step-id">03 / Deliver</span>
-            <h3>GLB 2.0</h3>
-            <p>Download a binary glTF with normals and vertex colours directly from the browser’s Malla panel.</p>
+            <span class="step-id">03 / Verify</span>
+            <h3>Repair + topology gate</h3>
+            <p>Weld vertices, clean faces, orient winding, fill bounded holes, then reject open or non-manifold output.</p>
           </article>
           <article class="fabrication-step">
-            <span class="step-id">04 / Prepare</span>
-            <h3>3D print</h3>
-            <p>Repair for watertightness, set real-world units, convert to STL/3MF if needed, then orient, slice, and print.</p>
+            <span class="step-id">04 / Deliver</span>
+            <h3>3MF → slicer</h3>
+            <p>Scale the longest dimension in millimetres, rest the part on z=0, export 3MF, then inspect walls, orient, slice, and print.</p>
           </article>
         </div>
 
         <div class="mesh-metrics" aria-label="Measured alarm-clock mesh result">
           <div class="mesh-metric"><strong>24</strong><span>Orbit views</span></div>
           <div class="mesh-metric"><strong>96³</strong><span>TSDF voxels</span></div>
-          <div class="mesh-metric"><strong>24,866</strong><span>Triangles</span></div>
-          <div class="mesh-metric"><strong>0.75 MB</strong><span>GLB output</span></div>
+          <div class="mesh-metric"><strong>24,918</strong><span>GLB triangles</span></div>
+          <div class="mesh-metric"><strong>1.13 s</strong><span>RTX full path</span></div>
         </div>
 
         <div class="print-note">
           <strong>Geometry note</strong>
-          <span>Vanilla 3DGS can produce noisy or open surfaces. Use 2DGS/GOF input and validate the mesh before fabrication; one-click watertight repair and slicing are not implemented in this viewer.</span>
-          <a href="docs/open-vocab-3dgs-imagine-pipeline-paper.pdf#page=7">Method + measurements ↗</a>
+          <span>The synthetic acceptance emits a 0.60 MB 3MF at exactly 80 mm with zero open/non-manifold edges. The noisy 96³ alarm-clock attempt is deliberately blocked by the stricter geometry gate; prefer 2DGS/GOF input. Wall thickness, self-intersections, slicing, and a physical print are not certified.</span>
+          <a href="docs/performance.md">Method + measurements ↗</a>
         </div>
       </div>
     </section>

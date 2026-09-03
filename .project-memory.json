@@ -30,6 +30,7 @@
     "semantic_sidecar/**/*.py",
     "semantic_sidecar/**/*.sh",
     "scripts/**/*.sh",
+    "scripts/**/*.mjs",
     "tests/**/*.md",
     "tests/**/*.html",
     "tests/**/*.js",
@@ -153,6 +154,26 @@
       "mode": "search",
       "query": "Gaussian splat TSDF surface nets GLB 3D print fabrication path paper figures",
       "expected_paths": ["index.html"]
+    },
+    {
+      "mode": "search",
+      "query": "reciprocal overlap graph gaussianThreshold cross-view association masks",
+      "expected_paths": ["shared/lift.js"]
+    },
+    {
+      "mode": "search",
+      "query": "repairMesh scaleMeshToMillimeters validateMesh",
+      "expected_paths": ["shared/mesh-ops.js"]
+    },
+    {
+      "mode": "search",
+      "query": "encode3mf read3mfFiles THREE_MF",
+      "expected_paths": ["shared/three-mf.js"]
+    },
+    {
+      "mode": "search",
+      "query": "real GPU profile WebGPU adapter median p95 SAM performance",
+      "expected_paths": ["scripts/profile-webgpu.mjs", "docs/performance.md"]
     }
   ]
 }

@@ -2,7 +2,7 @@
 
 **Technical report · implementation note**  
 Gaussian Splatting Web Viewers — WebGPU path  
-2 September 2026 · revised 3 September 2026 (SAM 2.1 in JavaScript, splat-to-mesh mathematics, GLB and fabrication handoff)
+2 September 2026 · revised 3 September 2026 (reciprocal multi-view association, real-GPU profile, topology repair and 3MF)
 
 PDF: [open-vocab-3dgs-imagine-pipeline-paper.pdf](open-vocab-3dgs-imagine-pipeline-paper.pdf) · operator notes: [pipeline.md](pipeline.md)
 
@@ -10,9 +10,9 @@ PDF: [open-vocab-3dgs-imagine-pipeline-paper.pdf](open-vocab-3dgs-imagine-pipeli
 
 ## Abstract
 
-This report describes a *modular* browser pipeline that (i) loads and rasterizes a 3D Gaussian Splatting (3DGS) scene with WebGPU, (ii) captures calibrated views, (iii) obtains promptable masks with SAM 2.1 running in JavaScript through transformers.js and ONNX Runtime Web, (iv) lifts those masks to per-Gaussian instance labels, (v) edits and exports instances, and (vi) fuses isolated-instance depth maps into a TSDF, extracts a surface-nets mesh and writes a binary glTF 2.0 (`.glb`). A parallel vision–language path supplies open-vocabulary names and Grok Imagine Image 2.0 object-card *edits*. The design follows the 2D-lift paradigm of PointGS, GALA, and LangSplat: **semantics are applied to images composited from known Gaussians under known cameras**, not to unconditioned image generations. The GLB is a fabrication handoff, not proof of a watertight, dimensioned or physically printed object. NVIDIA ArtiFixer remains an optional later repair stage. This is an implementation note for the `Gaussian-Splatting-WebViewers` repository; it does not claim new reconstruction metrics.
+This report describes a *modular* browser pipeline that (i) loads and rasterizes a 3D Gaussian Splatting (3DGS) scene with WebGPU, (ii) captures calibrated views, (iii) obtains promptable masks with SAM 2.1 running in JavaScript through transformers.js and ONNX Runtime Web, (iv) lifts and associates those masks into per-Gaussian instance labels, (v) edits and exports instances, and (vi) fuses isolated-instance depth maps into a TSDF. The geometry path writes a coloured binary glTF 2.0 (`.glb`) or remeshes with marching tetrahedra, validates/repairs topology, scales to millimetres and writes a 3MF package. A parallel vision–language path supplies open-vocabulary names and Grok Imagine Image 2.0 object-card *edits*. The design follows the 2D-lift paradigm of PointGS, GALA, and LangSplat: **semantics are applied to images composited from known Gaussians under known cameras**, not to unconditioned image generations. A successful topology gate is still not proof of adequate wall thickness, slicer settings or a physically printed object. This is an implementation note for the `Gaussian-Splatting-WebViewers` repository; it does not claim new reconstruction metrics.
 
-**Keywords:** 3D Gaussian Splatting, WebGPU, SAM 2.1, transformers.js, open-vocabulary segmentation, TSDF, surface nets, GLB, 3D-print handoff, Grok Imagine
+**Keywords:** 3D Gaussian Splatting, WebGPU, SAM 2.1, transformers.js, open-vocabulary segmentation, TSDF, surface nets, marching tetrahedra, GLB, 3MF, Grok Imagine
 
 ---
 
@@ -24,7 +24,7 @@ Browser viewers historically packed everything to 32-byte rows and looked like p
 
 1. Segment captured 3DGS frames with **SAM 2.1 in the browser**, or with a sidecar mask backend.
 2. Lift multi-view masks into stable labels on Gaussian indices and expose instance editing/export.
-3. Reconstruct an isolated instance from orbit depth maps as a coloured GLB mesh.
+3. Reconstruct an isolated instance from orbit depth maps as a coloured GLB or topology-gated, millimetre-scale 3MF mesh.
 4. Tag captured frames with **Grok 4.6 vision**, cluster names, and use **Grok Imagine Image 2.0** only to edit crops into object cards under `img_output/`.
 
 The scientific constraint, taken from PointGS [10] and related open-vocab 3DGS work [11–15], is:
@@ -50,7 +50,7 @@ Table 1 distinguishes methods whose *equations or formats* are in the running sy
 | antimatter15/splat [6], Kellogg GaussianSplats3D [7], quadjr/aframe-gaussian-splatting [8] | Heritage WebGL viewers and 32-byte layout |
 | xAI Grok vision + Imagine Image 2.0 [20, 21] | Tagging and object-card *edits* |
 | SAM 2.1 [26] + transformers.js [32] | Promptable masks on independent browser-rendered views; the SAM video-memory path is not used |
-| TSDF fusion [28, 29], surface nets [30, 31], glTF 2.0 [34] | Isolated splat instance → fused implicit surface → coloured GLB mesh |
+| TSDF fusion [28, 29], surface nets [30, 31], marching tetrahedra [37], glTF 2.0 [34], 3MF Core [35] | Isolated splat instance → fused implicit surface → coloured GLB or topology-gated 3MF mesh |
 
 ---
 
@@ -142,11 +142,11 @@ The tagging pipeline of Sections 3–5 labels *views*. The segmentation plan [`p
 | F0 Base | GaussForge vendored (offline decode, CDN fallback), 2DGS PLY, `artifacts/`, Node + Playwright test harness (offscreen rendering under SwiftShader) | `vendor/gaussforge/`, `shared/splat-io.js`, `tests/` |
 | F1 Identity | `u32` label per Gaussian and a 4096-entry instance table (rigid/affine transform, tint, visible/selected) read in the vertex shader; output modes colour / alpha-weighted mean depth / normal / ID with offscreen readback; `pick()` from the ID pass | `gpu-renderer.js` |
 | F2 Superpoints | kNN graph (k = 10, hash grid sorted by cell), symmetric Mahalanobis distance × SH0 colour weights, threshold, connected components → superpoints; weighted-majority label diffusion over the graph | `shared/graph.js` in a worker |
-| F3 Lift | K-buffer fragment pass storing (index, α, depth) per pixel with exact overflow handling (chunked depth-sorted draw), compute resolve that carries transmittance and the exact 2DGS median depth [22]; per-Gaussian α·T mass per mask label → FlashSplat closed-form argmax with a background bias [23]; Gaga-style association across views by containment of superpoint histograms [24]; LUDVIG-style graph diffusion [25]; export `instancias.json` + `etiquetas.u32` | `contrib-pass.js`, `shared/lift.js` |
+| F3 Lift | K-buffer fragment pass storing (index, α, depth) per pixel with exact overflow handling; per-Gaussian α·T mass → FlashSplat argmax [23]; reciprocal-best cross-view graph using both superpoint containment and direct Gaussian overlap, with at most one mask from each view per component [24]; LUDVIG-style graph diffusion [25]; export `instancias.json` + `etiquetas.u32` | `contrib-pass.js`, `shared/lift.js` |
 | Masks | SAM 2.1 hiera-tiny in the browser (transformers.js + ONNX Runtime Web, WASM or WebGPU) prompted by projected superpoint centroids with duplicate-mask merging [26]; or the sidecar (`/segment`: Grok boxes rasterised as ellipses, pluggable SAM backend) | `ml-browser.js`, `semantic_sidecar/server.py` |
 | F4 Name | Isolated render per instance (camera framed on its bounds, only its Gaussians) → `/name` Grok VQA with a Spanish JSON schema; CLIP ViT-B/32 image/text embeddings in the browser for semantic search [27]; Imagine card per `id_instancia` | `shared/naming.js`, `ml-browser.js` |
 | F5 Edit / export | Selection on the ID buffer (rectangle, brush, 3D sphere, superpoint), reproducible `ops.jsonl` (assign, transform, delete, duplicate, merge, rename) with undo by replay, transforms baked at export; PLY with `instance_id` / `class_id` / `confidence`, `.splat`, SPZ and compressed PLY through GaussForge; a reloaded PLY restores its instances | `shared/edit-ops.js`, `shared/export-io.js` |
-| F6 Mesh | Fibonacci-sphere orbit around the isolated instance → depth (mean, or 2DGS median) + colour → truncated signed distance fusion with empty-space carving [28, 29] → naive surface nets [30, 31] → largest component → GLB 2.0 with normals and vertex colours | `shared/tsdf.js` in a worker, `shared/glb.js` |
+| F6 Mesh | Fibonacci orbit → depth/colour → TSDF [28, 29]. GLB uses surface nets [30, 31]. 3MF uses a consistent six-tetrahedra decomposition [37], conservative cleanup/repair, explicit manifold/winding checks, millimetre scaling and OPC packaging [35] | `shared/tsdf.js`, `mesh-ops.js`, `glb.js`, `three-mf.js` in a worker |
 
 The invariant identifier is the Gaussian index in the source file; labels, selections, exports and duplicates (`origen`) are expressed on it, and every `instancias.json` is validated against `shared/schemas/instancias.schema.json`.
 
@@ -180,9 +180,9 @@ keeping the higher-score mask. The remaining masks are painted from largest to s
 
 The pure mask operations are covered by `tests/unit/ml-browser.test.mjs`. The opt-in `ML_E2E=1` browser test additionally loads the real model, checks two-view SAM lift on the two-sphere scene, and verifies CLIP search; it is kept outside the default suite because it requires downloaded weights and takes minutes under software rendering.
 
-### 6.3 Splat-to-mesh and GLB calculations
+### 6.3 Splat-to-mesh, GLB and 3MF calculations
 
-F6 does not triangulate Gaussian centres. It isolates one instance, renders depth/alpha/colour from multiple cameras, reconstructs an implicit signed-distance field, and extracts its zero level set. The following equations match `shared/naming.js`, `shared/tsdf.js`, `shared/tsdf-worker.js` and `shared/glb.js`.
+F6 does not triangulate Gaussian centres. It isolates one instance, renders depth/alpha/colour from multiple cameras, reconstructs an implicit signed-distance field, and extracts its zero level set. The following equations match `shared/naming.js`, `shared/tsdf.js`, `shared/tsdf-worker.js`, `shared/mesh-ops.js`, `shared/glb.js` and `shared/three-mf.js`.
 
 **Bounds and orbit.** For an axis-aligned instance box with diagonal length $d_b$, the untransformed bounding-sphere radius is $r=d_b/2$. After an F5 affine transform, the implementation multiplies $r$ by the largest norm of the transform's three linear columns. With vertical field of view $\phi$ and framing margin $m_f=1.5$, the orbit distance is
 
@@ -239,6 +239,17 @@ $$
 
 The cell vertex is the mean of its edge crossings. A finite-difference gradient of the eight corner values supplies the outward normal; quads around sign-changing grid edges become two triangles, winding is corrected against those normals, and only the connected component with the most triangles is retained. The diagnostic Euler characteristic is $\chi=V-E+F$; the analytic connected sphere test gives $\chi=2$, as expected for a closed genus-zero surface.
 
+**Print remesh and topology.** Surface nets stays the faster GLB path, but ambiguous voxel junctions can place more than two triangles on an edge. For 3MF, each cube is therefore split consistently into six tetrahedra around its body diagonal. A tetrahedron with one or three negative TSDF samples yields one triangle; a two/two sign split yields a quadrilateral split into two triangles. Crossings reuse the same interpolated vertex for each global grid edge, so adjacent cells agree on their boundary [37]. The repair pass then welds positions within $\varepsilon_w=10^{-6}d_b$ (with a $10^{-9}$ floor), removes invalid, duplicate and zero-area triangles, propagates consistent face orientation over edge adjacency, fills only simple boundary loops with at most 64 edges, and recomputes vertex normals.
+
+Validation counts the incidence $n_e$ and oriented direction of every undirected mesh edge $e$. The 3MF gate accepts only finite, non-degenerate, non-duplicate triangles satisfying
+
+$$
+\forall e:\;n_e=2,\qquad d_{e,1}=-d_{e,2},\qquad
+\left|\frac16\sum_{(a,b,c)}\mathbf p_a\cdot(\mathbf p_b\times\mathbf p_c)\right|>0.
+$$
+
+Thus boundary edges ($n_e=1$), non-manifold edges ($n_e>2$), and equal-direction pairs are reported separately. The Euler characteristic remains diagnostic but is not used as a watertightness test.
+
 **Binary glTF.** For $V$ mesh vertices and $T$ triangles, the writer stores float32 position, normal and RGB triples plus three uint32 indices per triangle. Its binary payload is therefore
 
 $$
@@ -251,54 +262,56 @@ $$
 B_{\mathrm{GLB}}=28+4\left\lceil\frac{B_{\mathrm{JSON}}}{4}\right\rceil+4\left\lceil\frac{B_{\mathrm{BIN}}}{4}\right\rceil.
 $$
 
-For the measured alarm-clock mesh, $V=12\,425$ and $T=24\,866$, so $B_{\mathrm{BIN}}=745\,692$ bytes; the small JSON/chunk overhead yields the observed approximately 0.75 MB GLB.
+For the current profiled alarm-clock GLB, $V=12\,419$ and $T=24\,918$, so $B_{\mathrm{BIN}}=746\,100$ bytes; the small JSON/chunk overhead yields the observed 747,332-byte file.
 
-### 6.4 Fabrication handoff: GLB to a 3D print
+### 6.4 Fabrication handoff: topology-gated 3MF
 
-The repository implements the path **splat → isolated depth views → TSDF → surface nets → GLB**. It does not yet implement mesh repair, a physical unit calibration, minimum-wall enforcement, supports, STL/3MF conversion, slicing, printer control or inspection of a physical part. Consequently, “exported GLB” must not be read as “ready to print.” glTF defines linear distances in metres [34], but the current exporter copies arbitrary scene coordinates without a metre calibration.
-
-For an external print-preparation tool, let the GLB bounding-box extents in scene units be $\Delta=(\Delta_x,\Delta_y,\Delta_z)$ and let the desired maximum print dimension be $L_{\mathrm{mm}}$. A transparent scale calculation is
+The implemented print path is **splat → isolated depth views → TSDF → marching tetrahedra → conservative repair → validation → millimetre scaling → 3MF**. Let the repaired bounding-box extents in scene units be $\Delta=(\Delta_x,\Delta_y,\Delta_z)$ and let the requested maximum print dimension be $L_{\mathrm{mm}}$. The viewer computes
 
 $$
 s_{\mathrm{mm}}=\frac{L_{\mathrm{mm}}}{\max(\Delta_x,\Delta_y,\Delta_z)},\qquad
-\mathbf p_{\mathrm{mm}}=s_{\mathrm{mm}}(\mathbf p-\mathbf c),
+\mathbf p_{\mathrm{mm}}=s_{\mathrm{mm}}(\mathbf p-\mathbf b_{\min}),
 $$
 
-where $\mathbf c$ is a chosen origin such as the box centre. If the corrected GLB is to remain standards-conformant before import into a slicer, use $\mathbf p_{\mathrm m}=\mathbf p_{\mathrm{mm}}/1000$. This conversion is external to the current viewer.
+where $\mathbf b_{\min}$ is the minimum box corner. This makes all coordinates non-negative and places the lowest point on the $z=0$ build plane. The 3MF model declares `unit="millimeter"`; scene coordinates are not presented as physically calibrated measurements.
 
-Before slicing, a repair tool should at minimum confirm that each undirected edge has exactly two consistently oriented incident faces, close holes and self-intersections, remove non-manifold geometry, and enforce a material- and process-specific wall thickness. The viewer's $\chi$ value is useful evidence but is not by itself a watertightness proof. After repair, a closed oriented triangle mesh can provide a material estimate through signed tetrahedra,
+`shared/three-mf.js` emits an OPC ZIP package with `[Content_Types].xml`, `_rels/.rels`, and `3D/3dmodel.model`; the root relationship targets the 3D model, whose resources contain one mesh object and whose build section references it, as required by 3MF Core [35]. The package uses uncompressed ZIP entries for deterministic, dependency-free generation and one average base material colour; GLB remains the format that preserves per-vertex colours.
+
+After validation, a closed oriented triangle mesh can provide a solid-volume estimate through signed tetrahedra,
 
 $$
 V_{\mathrm{mesh}}=\left|\frac16\sum_{(a,b,c)}\mathbf p_a\cdot(\mathbf p_b\times\mathbf p_c)\right|,
 \qquad m_{\mathrm{material}}\approx \rho V_{\mathrm{mesh}},
 $$
 
-before infill and support corrections. Volume/mass calculation, 3MF packaging [35], slicer settings and physical-print validation are not implemented or claimed in this repository.
+before infill and support corrections. The implementation reports signed volume and surface area but does **not** test self-intersections, minimum wall thickness, overhangs, supports, shrinkage, material/process parameters, slicer compatibility, printer control or a physical part. Accordingly, “topology-gated 3MF” means a closed oriented triangle complex at the requested scale, not a certified printable object.
 
-### 6.5 Results (container with 4 vCPU, no GPU: WebGPU on SwiftShader, ONNX on WASM)
+### 6.5 Results (software CI and a real RTX 3090 Ti profile)
 
 | Measurement | Synthetic two spheres (4 000 Gaussians) | `alarm_clock_generated.splat` (262 144 Gaussians) |
 | --- | --- | --- |
 | F1 depth error at the sphere centre | 0.0 % (analytic front surface) | — |
-| F2 graph | 2 superpoints in 109 ms | 113 154 superpoints in 3.0–3.8 s (threshold 0.3 is too fine for real scenes) |
-| F3 K-buffer | exact: 0 mis-assigned Gaussians from one view | ≈ 35 s per view at 512 px (≈ 670 chunks; ~100 fragments per pixel) |
+| F2 graph | 2 superpoints in 109 ms | 113 154 superpoints in 1.93 s worker / 1.97 s wall on the profiled CPU (threshold 0.3 remains very fine) |
+| F3 K-buffer | exact: 0 mis-assigned Gaussians from one view | 760.8 ms median, 937.1 ms p95 at 512 × 320 on RTX 3090 Ti |
 | F3 lift, test masks | 6 permuted views → 2 instances, 3D IoU 0.9985 / 1.0 (1.0 / 1.0 after diffusion) | — |
 | Masks, Grok boxes | — | 1 coarse box per view → 5 fragments, 0 cross-view merges |
-| Masks, SAM 2.1 in the browser | 2 views → exactly 2 instances of 2 000 Gaussians; encode ≈ 21 s/view, decode ≈ 0.4 s/prompt | coherent parts (body, face, hands, bell, legs, button; scores 0.73–0.97); 12 of 31 duplicate masks merged; 17 instances with only 2 cross-view merges |
+| Masks, SAM 2.1 in the browser | 2 views → exactly 2 instances of 2 000 Gaussians in the opt-in acceptance | real four-view/eight-prompt run: 20 masks → 13 instances, 7 cross-view merges; 69.29 s total, including 12.24–12.54 s WASM encoding per view |
 | F4 Grok naming | "esfera naranja" 0.92 in 12.6 s; Imagine card 7.7 s | "reloj analógico" 0.72 for the largest instance |
 | F4 CLIP | "an orange ball" / "a blue sphere" rank the right sphere | similarities flat (0.20–0.24) on fragments |
 | F5 | export instance → reload shows only that object; `ops.jsonl` replay reproduces the fingerprint | 4 986-Gaussian selection moved in 7 ms, SPZ 70 KB in 57 ms; whole scene SPZ 3.7 MB in 1.7 s; undo 0.3 s |
-| F6 | closed mesh, mean radius 0.535–0.545 for r = 0.5 (+7–9 %, splat extent), 12–16 views in 7–15 s | whole clock: 24 views, 96³ voxels → 12 425 vertices / 24 866 triangles, 0.75 MB GLB; render 374 s (SwiftShader), fusion 0.8 s, extraction 0.1 s |
+| F6 | GLB radius within ±12 %; print acceptance at 8 views / 32³ → 4 472 vertices, 8 940 triangles, 0 boundary/non-manifold edges, 80 mm maximum, 0.60 MB 3MF | current clock GLB: 24 views, 96³ → 12 419 vertices / 24 918 triangles, 747 332 bytes; 1 125.7 ms total (202 ms render, 625 ms fusion, 271 ms extraction/validation); 96³ 3MF correctly blocked on four sub-threshold triangles |
 
-Tests: 110 Node unit tests and 22 default Playwright tests (plus one opt-in test that runs SAM 2.1 and CLIP in the browser) cover every phase; see [testing.md](testing.md).
+The hardware profile used NVIDIA driver 580.173.02, Playwright 1.56.1 / Chromium 141 and the shipped 262 144-Gaussian clock. The original five-run colour and mean-depth medians were 5.0 and 7.7 ms; the post-repair three-run refresh measured 6.5 and 5.0 ms. SAM fell back to WASM because this ONNX WebGPU stack did not expose fp16 support; the renderer remained on the NVIDIA adapter. The 13-instance result is a same-workflow improvement over the earlier greedy 17-instance/2-merge result, but not an accuracy score because no human instance ground truth exists. Raw methodology and reproducible commands are in [performance.md](performance.md).
+
+Tests: 122 Node unit tests and 23 default Playwright tests (plus one opt-in test that runs SAM 2.1 and CLIP in the browser) cover every phase; see [testing.md](testing.md).
 
 ### 6.6 Deviations from the plan and open items
 
-- Meshing runs in JavaScript (TSDF + surface nets) instead of Open3D in the sidecar: it works offline and without a 450 MB dependency; Open3D and Poisson remain optional backends.
+- Meshing runs in JavaScript (TSDF + surface nets / marching tetrahedra) instead of Open3D in the sidecar: it works offline and without a 450 MB dependency; Open3D and Poisson remain optional backends.
 - Model weights are not vendored in git; `scripts/download-ml-models.sh` fetches transformers.js, ONNX Runtime Web, SAM 2.1 and CLIP into the gitignored `vendor/ml/`. Without it the browser loads them from jsDelivr and the Hugging Face Hub.
-- Cross-view association on real scenes is the weak link: with 113k tiny superpoints the same part seen from different angles often stays a separate instance. Next step: 3D-overlap association after the lift and a coarser F2 threshold.
+- Reciprocal-best association now combines superpoint evidence with direct Gaussian overlap and improved the clock run from 17 instances/2 merges to 13/7. It still needs labelled multi-view scenes to measure precision/recall and tune thresholds; 113k tiny superpoints remain an over-fragmented prior.
 - Vanilla 3DGS gives a noisy mesh (the HUD warns); 2DGS/GOF PLYs are recommended for production meshes. A Chamfer-distance check against a reference mesh is still pending.
-- The GLB is a geometry-exchange artifact, not a print-ready deliverable: watertight repair, calibrated units, wall-thickness checks, STL/3MF conversion, slicing and physical validation remain external.
+- GLB remains a geometry-exchange artifact. 3MF adds repair, an explicit topology gate and requested millimetre scale, but calibration, self-intersection/wall-thickness checks, slicing and physical validation remain external.
 - Not implemented: lasso selection, exact baking of non-uniform scales, hole filling after deletion, in-viewer mesh preview, decimation.
 
 ---
@@ -361,6 +374,8 @@ This repository’s WebGL heritage and the WebGPU/semantic additions use third-p
 | CLIP [27] | Radford et al., ICML 2021 | Image/text embeddings for semantic search | Fine-tuning |
 | Volumetric fusion / KinectFusion [28, 29] | Curless & Levoy 1996; Newcombe et al. 2011 | Truncated signed distance integration with weights and space carving | GPU tracking, ICP |
 | Surface nets [30, 31] | Gibson 1998; Lysenko 2012 (naive surface nets) | Vertex per sign-changing voxel, quads across sign-changing edges | Dual contouring with QEF |
+| Marching tetrahedra [37] | Doi and Koide 1991 | Consistent six-tetrahedra TSDF remesh for the topology-gated print path | Adaptive refinement |
+| 3MF Core [35] | 3MF Consortium | OPC package structure, millimetre model, mesh object and build item | Production extensions and slicer policy |
 | SuperSplat [33] | PlayCanvas | Selection-tool UX (rectangle, brush, sphere) and per-object export formats | Its editor and file formats |
 
 ### 8.3 License compatibility (summary)
@@ -387,7 +402,7 @@ Default URL loads `../splats/alarm_clock_generated.splat`. In the HUD: **Tag sce
 
 For SH3 radiance fields, drop a trained `point_cloud.ply` instead of the compact splat. Chrome / Vulkan notes: [webgpu-chrome.md](webgpu-chrome.md).
 
-Segmentation, editing and meshing (Section 6): HUD panels **Grupos** → **Segmentación** (mask source *SAM 2 (navegador)* after `scripts/download-ml-models.sh`) → **Instancias** (naming, CLIP search) → **Edición** (selection tools, transforms, export) → **Malla** (GLB). Outputs land under `artifacts/`; the HUD walkthrough is in [pipeline.md](pipeline.md).
+Segmentation, editing and meshing (Section 6): HUD panels **Grupos** → **Segmentación** (mask source *SAM 2 (navegador)* after `scripts/download-ml-models.sh`) → **Instancias** (naming, CLIP search) → **Edición** (selection tools, transforms, export) → **Malla** (GLB, or topology-gated 3MF with a requested maximum dimension in millimetres). Outputs land under `artifacts/`; the HUD walkthrough is in [pipeline.md](pipeline.md).
 
 ---
 
@@ -396,9 +411,9 @@ Segmentation, editing and meshing (Section 6): HUD panels **Grupos** → **Segme
 - Compact `.splat` is SH0; Imagine stills can look sharper than the 3DGS source because the edit model *hallucinates* high-frequency texture. They are illustrations, not measurements.
 - View-tag clustering (stage 5) is string-based; CLIP embeddings [27] are used only for per-instance search (F4).
 - SAM 2.1 and CLIP now run in the browser (Section 6); there is still no contrastive Gaussian affinity field and no ArtiFixer GPU in this process.
-- Cross-view instance association on real scenes is weak (Section 6.6); F2's default threshold over-fragments real scans.
-- The exported GLB has arbitrary scene scale and may be noisy or non-manifold; the repository does not claim watertightness, print units, minimum wall thickness, slicer compatibility or a successful physical print (Section 6.4).
-- Timings in Section 6.5 come from SwiftShader/WASM; a real GPU is expected to be one to two orders of magnitude faster for the WebGPU passes.
+- Cross-view association has stronger reciprocal Gaussian-overlap evidence, but lacks labelled real-scene precision/recall; F2's default threshold still over-fragments the clock.
+- GLB may be noisy or non-manifold. The 3MF gate proves only finite, consistently oriented two-face edge incidence and non-zero signed volume at a requested scale; it does not prove self-intersection freedom, wall thickness, slicer compatibility or a successful physical print (Section 6.4).
+- The real-GPU measurements are specific to one RTX 3090 Ti/driver/browser stack. SAM still ran on WASM because the loaded fp16 graph was unsupported by that WebGPU device path.
 - Vision may under-label blurry splat views; zoom before tagging.
 - Imagine URL downloads can 403; the sidecar requests `b64_json`.
 
@@ -474,9 +489,11 @@ Segmentation, editing and meshing (Section 6): HUD panels **Grupos** → **Segme
 
 [34] Khronos 3D Formats Working Group, “glTF 2.0 Specification,” version 2.0.1. [https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html)
 
-[35] 3MF Consortium, “3MF Specification Suite,” 2025. [https://3mf.io/spec/](https://3mf.io/spec/)
+[35] 3MF Consortium, “3MF Core Specification,” version 1.4.0. [https://github.com/3MFConsortium/spec_core](https://github.com/3MFConsortium/spec_core)
 
 [36] Marked contributors, Marked; KaTeX contributors, KaTeX; Uzi Ashkenazi, `marked-katex-extension` (MIT). [https://github.com/markedjs/marked](https://github.com/markedjs/marked) [https://github.com/KaTeX/KaTeX](https://github.com/KaTeX/KaTeX) [https://github.com/UziTech/marked-katex-extension](https://github.com/UziTech/marked-katex-extension)
+
+[37] A. Doi and A. Koide, “An Efficient Method of Triangulating Equi-Valued Surfaces by Using Tetrahedral Cells,” *IEICE Transactions*, 1991.
 
 ---
 
@@ -488,9 +505,9 @@ Segmentation, editing and meshing (Section 6): HUD panels **Grupos** → **Segme
 | `semantic_sidecar/server.py` | Vision + Imagine + `img_output/` |
 | `shared/splat-io.js` | Shared I/O |
 | `gaussian_splatting_webgpu/contrib-pass.js`, `ml-browser.js` | K-buffer pass (F3); SAM 2.1 + CLIP in the browser |
-| `shared/graph.js`, `lift.js`, `naming.js`, `edit-ops.js`, `export-io.js`, `tsdf.js`, `glb.js`, `schemas.js` (+ workers) | Superpoints, lift, naming, edit log, encoders, TSDF mesh, GLB, schema checks (plan F2–F6) |
+| `shared/graph.js`, `lift.js`, `naming.js`, `edit-ops.js`, `export-io.js`, `tsdf.js`, `mesh-ops.js`, `glb.js`, `three-mf.js`, `schemas.js` (+ workers) | Superpoints, reciprocal mask association, edit log, TSDF mesh, topology repair, GLB/3MF encoders and schema checks (plan F2–F6) |
 | `shared/schemas/instancias.schema.json` | Schema of `instancias.json` (`scripts/validate-instancias.mjs`) |
-| `scripts/download-ml-models.sh`, `render-mermaid.mjs`, `bench-graph.mjs` | One-shot tools |
+| `scripts/download-ml-models.sh`, `render-mermaid.mjs`, `bench-graph.mjs`, `profile-webgpu.mjs`, `check-source.sh` | Model setup, figures, benchmarks, reproducible profiles and source checks |
 | `artifacts/{segmentaciones,exportaciones,mallas}/` | Generated outputs (gitignored) |
 | `docs/figures/segmentation-pipeline.{mmd,svg,png}` | Figure 3 |
 | `docs/plan-segmentacion-edicion-3dgs.md` | Roadmap and per-phase status (Spanish) |
