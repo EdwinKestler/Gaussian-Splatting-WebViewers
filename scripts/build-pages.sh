@@ -27,6 +27,8 @@ publish_roots=(
   splat_converter/main.js
   vendor/gaussforge
   splats/alarm_clock_generated.splat
+  docs/figures/pipeline-flowchart.png
+  docs/figures/demo-potted-plants-pair.png
   docs/figures/segmentation-pipeline.png
   docs/open-vocab-3dgs-imagine-pipeline-paper.pdf
 )

@@ -148,6 +148,11 @@
       "mode": "search",
       "query": "Deploy GitHub Pages upload-pages-artifact github-pages environment id-token",
       "expected_paths": [".github/workflows/pages.yml"]
+    },
+    {
+      "mode": "search",
+      "query": "Gaussian splat TSDF surface nets GLB 3D print fabrication path paper figures",
+      "expected_paths": ["index.html"]
     }
   ]
 }

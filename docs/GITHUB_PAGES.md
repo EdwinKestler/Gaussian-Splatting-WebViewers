@@ -4,7 +4,7 @@ The public site is designed for:
 
 <https://edwinkestler.github.io/Gaussian-Splatting-WebViewers/>
 
-The deployment is a static browser build. It includes the landing page, all four viewers, the converter, shared browser modules, vendored GaussForge, the shipped alarm-clock scene, the pipeline figure, and the report PDF.
+The deployment is a static browser build. It includes the landing page, all four viewers, the converter, shared browser modules, vendored GaussForge, the shipped alarm-clock scene, all three paper figures, and the report PDF.
 
 It deliberately excludes:
 
@@ -21,7 +21,7 @@ The allowlist is implemented by `scripts/build-pages.sh`. It obtains file names 
 
 ```bash
 temporary_root="$(mktemp -d)"
-./scripts/build-pages.sh "$temporary_root/site"
+bash ./scripts/build-pages.sh "$temporary_root/site"
 python3 -m http.server 8090 --bind 127.0.0.1 --directory "$temporary_root/site"
 ```
 

@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="description" content="A WebGPU laboratory for viewing, segmenting, naming, editing, exporting, and meshing 3D Gaussian Splatting scenes in the browser." />
-  <meta name="theme-color" content="#07110f" />
+  <meta name="theme-color" content="#0d0e11" />
   <meta property="og:title" content="Gaussian Splatting Web Viewers" />
   <meta property="og:description" content="From radiance fields to editable objects—inside the browser." />
   <meta property="og:type" content="website" />
@@ -38,6 +38,7 @@
 
     html {
       scroll-behavior: smooth;
+      overflow-x: clip;
     }
 
     body {
@@ -681,6 +682,744 @@
         transition: none;
       }
     }
+
+    /* Editorial system inspired by technical field guides: high-contrast type,
+       warm paper, hard borders, and signal colors. */
+    :root {
+      color-scheme: light;
+      --bg: #f3efe3;
+      --bg-soft: #ebe5d6;
+      --panel: #f8f4e9;
+      --panel-solid: #f8f4e9;
+      --line: rgba(17, 17, 19, 0.28);
+      --line-strong: #111113;
+      --text: #111113;
+      --muted: #625f58;
+      --mint: #2de1d1;
+      --mint-strong: #16b9ab;
+      --lime: #ffd22f;
+      --blue: #bba4dc;
+      --orange: #ff6b2b;
+      --paper: #f3efe3;
+      --ink: #111113;
+      --white: #fffdf6;
+      --shadow: none;
+      --radius: 2px;
+      --max: 1240px;
+    }
+
+    body {
+      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--paper);
+      color: var(--ink);
+      overflow-x: clip;
+    }
+
+    code {
+      color: inherit;
+      background: rgba(17, 17, 19, 0.08);
+      padding: 0.08em 0.28em;
+    }
+
+    .site-header {
+      border-color: rgba(255, 255, 255, 0.18);
+      background: rgba(13, 14, 17, 0.94);
+      color: var(--white);
+    }
+
+    .nav {
+      min-height: 64px;
+    }
+
+    .brand {
+      text-transform: uppercase;
+      letter-spacing: 0.02em;
+      font-weight: 900;
+    }
+
+    .brand-mark {
+      border: 1px solid var(--yellow, #ffd22f);
+      border-radius: 50%;
+      background: var(--lime);
+      color: var(--ink);
+      box-shadow: none;
+    }
+
+    .nav-links {
+      color: rgba(255, 255, 255, 0.74);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .nav-links a:hover {
+      color: var(--lime);
+    }
+
+    .hero.shell,
+    .dark-band.shell,
+    .print-band.shell,
+    .requirements-band.shell {
+      width: 100%;
+      max-width: none;
+      padding-left: max(20px, calc((100vw - var(--max)) / 2));
+      padding-right: max(20px, calc((100vw - var(--max)) / 2));
+    }
+
+    .hero.shell {
+      min-height: min(920px, calc(100vh - 64px));
+      padding-top: clamp(72px, 9vw, 128px);
+      padding-bottom: clamp(72px, 8vw, 112px);
+      border-bottom: 1px solid var(--ink);
+      background: #0d0e11;
+      color: var(--white);
+    }
+
+    .eyebrow,
+    .section-kicker {
+      color: var(--orange);
+      font: 900 11px/1.2 "SFMono-Regular", Consolas, monospace;
+      letter-spacing: 0.16em;
+    }
+
+    .eyebrow::before {
+      width: 9px;
+      height: 9px;
+      background: var(--mint);
+    }
+
+    h1,
+    .section-heading,
+    .print-title {
+      font-family: "Arial Black", Impact, Haettenschweiler, sans-serif;
+      font-weight: 900;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      max-width: 760px;
+      margin-bottom: 30px;
+      font-size: clamp(66px, 9.2vw, 144px);
+      line-height: 0.83;
+      letter-spacing: -0.078em;
+    }
+
+    .gradient-text {
+      background: none;
+      color: var(--lime);
+      -webkit-text-fill-color: currentColor;
+    }
+
+    .dot-word {
+      color: var(--orange);
+    }
+
+    .hero-copy {
+      max-width: 570px;
+      color: rgba(255, 255, 255, 0.72);
+      font-size: clamp(16px, 1.55vw, 20px);
+    }
+
+    .button {
+      min-height: 47px;
+      padding-inline: 21px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: 900;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+
+    .button-primary {
+      border: 1px solid var(--lime);
+      background: var(--lime);
+      color: var(--ink);
+      box-shadow: none;
+    }
+
+    .button-secondary {
+      border-color: rgba(255, 255, 255, 0.5);
+      background: transparent;
+      color: var(--white);
+    }
+
+    .fact {
+      border: 0;
+      border-left: 2px solid var(--mint);
+      border-radius: 0;
+      background: transparent;
+      color: rgba(255, 255, 255, 0.62);
+      font: 700 11px/1.3 "SFMono-Regular", Consolas, monospace;
+      text-transform: uppercase;
+    }
+
+    .scene-card {
+      min-height: 600px;
+      border: 1px solid rgba(255, 255, 255, 0.74);
+      border-radius: 2px;
+      background:
+        linear-gradient(rgba(13, 14, 17, 0.1), rgba(13, 14, 17, 0.68)),
+        var(--blue);
+      box-shadow: 20px 20px 0 var(--orange);
+    }
+
+    .scene-grid {
+      background-image:
+        linear-gradient(rgba(17, 17, 19, 0.14) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(17, 17, 19, 0.14) 1px, transparent 1px);
+    }
+
+    .splat-a {
+      background:
+        radial-gradient(circle at 42% 35%, #fff 0 2%, transparent 3%),
+        radial-gradient(circle at 64% 52%, var(--lime) 0 1.8%, transparent 3%),
+        radial-gradient(circle at 38% 66%, var(--orange) 0 1.5%, transparent 3%),
+        repeating-radial-gradient(circle, rgba(255, 210, 47, 0.9) 0 1.5px, transparent 2.4px 8px);
+      box-shadow: 0 0 88px rgba(255, 210, 47, 0.34);
+    }
+
+    .splat-b {
+      background:
+        radial-gradient(circle at 34% 38%, #fff 0 2%, transparent 3%),
+        radial-gradient(circle at 65% 63%, var(--mint) 0 1.8%, transparent 3%),
+        repeating-radial-gradient(circle, rgba(45, 225, 209, 0.85) 0 1.4px, transparent 2.2px 7px);
+      box-shadow: 0 0 80px rgba(45, 225, 209, 0.32);
+    }
+
+    .scene-topbar,
+    .scene-caption {
+      color: var(--white);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      text-transform: uppercase;
+    }
+
+    .live-dot::before {
+      background: var(--lime);
+      box-shadow: none;
+    }
+
+    .hud,
+    .hud strong {
+      color: var(--white);
+    }
+
+    .ticker {
+      overflow: hidden;
+      border-bottom: 1px solid var(--ink);
+      background: var(--lime);
+      color: var(--ink);
+    }
+
+    .ticker-track {
+      width: max-content;
+      display: flex;
+      gap: 0;
+      animation: ticker-slide 28s linear infinite;
+    }
+
+    .ticker-track span {
+      padding: 14px 32px;
+      border-right: 1px solid var(--ink);
+      font: 900 12px/1 "SFMono-Regular", Consolas, monospace;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    @keyframes ticker-slide {
+      to { transform: translateX(-50%); }
+    }
+
+    .section {
+      padding-top: clamp(76px, 9vw, 132px);
+      padding-bottom: clamp(76px, 9vw, 132px);
+    }
+
+    .section-kicker {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 28px;
+    }
+
+    .section-kicker::after {
+      content: "";
+      width: 54px;
+      height: 1px;
+      background: currentColor;
+    }
+
+    .section-heading {
+      max-width: 980px;
+      margin-bottom: 28px;
+      font-size: clamp(52px, 8vw, 108px);
+      line-height: 0.88;
+      letter-spacing: -0.065em;
+    }
+
+    .section-intro {
+      max-width: 700px;
+      color: var(--muted);
+      font-size: clamp(17px, 1.7vw, 21px);
+    }
+
+    .capability-grid {
+      gap: 0;
+      border: 1px solid var(--ink);
+    }
+
+    .card {
+      min-height: 330px;
+      border: 0;
+      border-right: 1px solid var(--ink);
+      border-radius: 0;
+      background: var(--lime);
+      color: var(--ink);
+    }
+
+    .card:nth-child(2) {
+      background: var(--blue);
+    }
+
+    .card:nth-child(3) {
+      border-right: 0;
+      background: var(--mint);
+    }
+
+    .card::after {
+      display: none;
+    }
+
+    .card-number {
+      border-color: var(--ink);
+      border-radius: 50%;
+      color: var(--ink);
+    }
+
+    .card h3 {
+      font-family: "Arial Black", Impact, sans-serif;
+      font-size: clamp(25px, 2.4vw, 34px);
+      line-height: 0.95;
+      text-transform: uppercase;
+    }
+
+    .card p {
+      color: rgba(17, 17, 19, 0.75);
+    }
+
+    .dark-band.shell {
+      border-block: 1px solid var(--ink);
+      background: #0d0e11;
+      color: var(--white);
+    }
+
+    .dark-band .pipeline-panel {
+      width: min(100%, var(--max));
+      margin-inline: auto;
+      padding: 0;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      box-shadow: none;
+    }
+
+    .pipeline-figure {
+      padding: 0;
+      border: 1px solid rgba(255, 255, 255, 0.55);
+      border-radius: 0;
+      background: var(--white);
+    }
+
+    .pipeline-figure img {
+      border-radius: 0;
+    }
+
+    .pipeline-figure figcaption,
+    .paper-figure figcaption {
+      padding: 14px 16px;
+      border-top: 1px solid currentColor;
+      font: 700 11px/1.45 "SFMono-Regular", Consolas, monospace;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .dark-band .section-intro,
+    .dark-band .pipeline-list li {
+      color: rgba(255, 255, 255, 0.65);
+    }
+
+    .dark-band .pipeline-list strong {
+      color: var(--white);
+    }
+
+    .dark-band .pipeline-list li::before {
+      color: var(--lime);
+    }
+
+    .paper-gallery .gallery-heading {
+      display: grid;
+      grid-template-columns: minmax(0, 1.15fr) minmax(280px, 0.55fr);
+      gap: 48px;
+      align-items: end;
+      margin-bottom: 48px;
+    }
+
+    .paper-gallery .section-heading {
+      margin-bottom: 0;
+    }
+
+    .paper-gallery .section-intro {
+      margin-bottom: 6px;
+    }
+
+    .paper-grid {
+      display: grid;
+      grid-template-columns: 1.15fr 0.85fr;
+      gap: 18px;
+    }
+
+    .paper-figure {
+      margin: 0;
+      border: 1px solid var(--ink);
+      background: var(--white);
+    }
+
+    .paper-figure img {
+      display: block;
+      width: 100%;
+      height: 100%;
+      max-height: 720px;
+      object-fit: contain;
+      background: #fff;
+    }
+
+    .paper-figure:first-child img {
+      aspect-ratio: 4 / 3;
+    }
+
+    .paper-figure:last-child img {
+      aspect-ratio: 4 / 3;
+    }
+
+    .paper-figure figcaption {
+      min-height: 76px;
+      color: var(--ink);
+    }
+
+    .print-band.shell {
+      border-block: 1px solid var(--ink);
+      background: var(--orange);
+      color: var(--ink);
+    }
+
+    .print-layout {
+      width: min(100%, var(--max));
+      margin-inline: auto;
+    }
+
+    .print-heading {
+      display: grid;
+      grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.5fr);
+      gap: 44px;
+      align-items: end;
+      margin-bottom: 54px;
+    }
+
+    .print-title {
+      margin: 0;
+      font-size: clamp(56px, 8.8vw, 122px);
+      line-height: 0.84;
+      letter-spacing: -0.07em;
+    }
+
+    .print-summary {
+      margin: 0 0 8px;
+      font-size: 18px;
+      font-weight: 650;
+    }
+
+    .fabrication-path {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      border: 1px solid var(--ink);
+      background: var(--paper);
+    }
+
+    .fabrication-step {
+      min-height: 270px;
+      padding: 24px;
+      border-right: 1px solid var(--ink);
+    }
+
+    .fabrication-step:last-child {
+      border-right: 0;
+      background: var(--lime);
+    }
+
+    .fabrication-step .step-id {
+      display: block;
+      margin-bottom: 72px;
+      font: 900 12px/1 "SFMono-Regular", Consolas, monospace;
+    }
+
+    .fabrication-step h3 {
+      margin-bottom: 10px;
+      font-family: "Arial Black", Impact, sans-serif;
+      font-size: 25px;
+      line-height: 0.95;
+      text-transform: uppercase;
+    }
+
+    .fabrication-step p {
+      margin: 0;
+      color: rgba(17, 17, 19, 0.72);
+      font-size: 14px;
+    }
+
+    .mesh-metrics {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      margin-top: 18px;
+      border: 1px solid var(--ink);
+    }
+
+    .mesh-metric {
+      padding: 20px;
+      border-right: 1px solid var(--ink);
+    }
+
+    .mesh-metric:last-child {
+      border-right: 0;
+    }
+
+    .mesh-metric strong {
+      display: block;
+      font-family: "Arial Black", Impact, sans-serif;
+      font-size: clamp(28px, 3vw, 42px);
+      line-height: 1;
+    }
+
+    .mesh-metric span {
+      font: 800 10px/1.2 "SFMono-Regular", Consolas, monospace;
+      text-transform: uppercase;
+    }
+
+    .print-note {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 18px;
+      align-items: center;
+      margin-top: 18px;
+      padding: 18px 20px;
+      border: 1px solid var(--ink);
+      background: var(--blue);
+      font-size: 14px;
+    }
+
+    .print-note strong {
+      font-family: "SFMono-Regular", Consolas, monospace;
+      text-transform: uppercase;
+    }
+
+    .print-note a {
+      font-weight: 900;
+      white-space: nowrap;
+    }
+
+    .viewer-grid {
+      gap: 0;
+      border: 1px solid var(--ink);
+    }
+
+    .viewer-card {
+      min-height: 160px;
+      border: 0;
+      border-right: 1px solid var(--ink);
+      border-bottom: 1px solid var(--ink);
+      border-radius: 0;
+      background: transparent;
+      color: var(--ink);
+    }
+
+    .viewer-card:nth-child(2n) {
+      border-right: 0;
+    }
+
+    .viewer-card:nth-last-child(-n + 2) {
+      border-bottom: 0;
+    }
+
+    .viewer-card:hover {
+      transform: none;
+      border-color: var(--ink);
+      background: var(--lime);
+    }
+
+    .viewer-card h3 {
+      font-family: "Arial Black", Impact, sans-serif;
+      text-transform: uppercase;
+    }
+
+    .viewer-card p {
+      color: var(--muted);
+    }
+
+    .viewer-card .arrow {
+      border-color: var(--ink);
+      color: var(--ink);
+    }
+
+    .requirements-band.shell {
+      border-top: 1px solid var(--ink);
+      background: var(--lime);
+    }
+
+    .requirements-band > * {
+      width: min(100%, var(--max));
+      margin-inline: auto;
+    }
+
+    .notice {
+      gap: 0;
+      border: 1px solid var(--ink);
+    }
+
+    .notice-block {
+      border: 0;
+      border-right: 1px solid var(--ink);
+      border-radius: 0;
+      background: var(--paper);
+    }
+
+    .notice-block:last-child {
+      border-right: 0;
+    }
+
+    .notice-block p,
+    .notice-block li {
+      color: var(--muted);
+    }
+
+    .notice-block a {
+      color: var(--ink);
+      font-weight: 900;
+    }
+
+    .site-footer {
+      border-color: var(--ink);
+      background: #0d0e11;
+      color: rgba(255, 255, 255, 0.65);
+    }
+
+    .footer-links a:hover {
+      color: var(--lime);
+    }
+
+    @media (max-width: 900px) {
+      .hero.shell {
+        min-height: auto;
+      }
+
+      .scene-card {
+        min-height: 500px;
+        box-shadow: 12px 12px 0 var(--orange);
+      }
+
+      .paper-gallery .gallery-heading,
+      .print-heading {
+        grid-template-columns: 1fr;
+      }
+
+      .paper-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .fabrication-path,
+      .mesh-metrics {
+        grid-template-columns: 1fr 1fr;
+      }
+
+      .fabrication-step:nth-child(2),
+      .mesh-metric:nth-child(2) {
+        border-right: 0;
+      }
+
+      .fabrication-step:nth-child(-n + 2),
+      .mesh-metric:nth-child(-n + 2) {
+        border-bottom: 1px solid var(--ink);
+      }
+
+      .card {
+        border-right: 0;
+        border-bottom: 1px solid var(--ink);
+      }
+
+      .card:last-child {
+        border-bottom: 0;
+      }
+    }
+
+    @media (max-width: 660px) {
+      .hero.shell,
+      .dark-band.shell,
+      .print-band.shell,
+      .requirements-band.shell {
+        padding-left: 18px;
+        padding-right: 18px;
+      }
+
+      h1 {
+        font-size: clamp(58px, 20vw, 88px);
+      }
+
+      .section-heading,
+      .print-title {
+        font-size: clamp(48px, 16vw, 72px);
+      }
+
+      .scene-card {
+        min-height: 410px;
+      }
+
+      .fabrication-path,
+      .mesh-metrics,
+      .viewer-grid,
+      .notice {
+        grid-template-columns: 1fr;
+      }
+
+      .fabrication-step,
+      .fabrication-step:nth-child(2),
+      .mesh-metric,
+      .mesh-metric:nth-child(2),
+      .viewer-card,
+      .notice-block {
+        border-right: 0;
+        border-bottom: 1px solid var(--ink);
+      }
+
+      .fabrication-step:last-child,
+      .mesh-metric:last-child,
+      .viewer-card:last-child,
+      .notice-block:last-child {
+        border-bottom: 0;
+      }
+
+      .viewer-card:nth-last-child(2) {
+        border-bottom: 1px solid var(--ink);
+      }
+
+      .print-note {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .ticker-track {
+        animation: none;
+      }
+    }
   </style>
 </head>
 <body>
@@ -698,8 +1437,9 @@
       </a>
       <div class="nav-links">
         <a href="#pipeline">Pipeline</a>
+        <a href="#paper">Paper</a>
+        <a href="#fabrication">3D print</a>
         <a href="#viewers">Viewers</a>
-        <a href="docs/open-vocab-3dgs-imagine-pipeline-paper.pdf">Report</a>
         <a href="https://github.com/EdwinKestler/Gaussian-Splatting-WebViewers">GitHub ↗</a>
       </div>
     </nav>
@@ -708,11 +1448,11 @@
   <main>
     <section class="hero shell" aria-labelledby="hero-title">
       <div>
-        <div class="eyebrow">WebGPU-native 3DGS workspace</div>
-        <h1 id="hero-title">From radiance fields to <span class="gradient-text">editable objects.</span></h1>
+        <div class="eyebrow">Open WebGPU 3DGS workspace · F0–F6</div>
+        <h1 id="hero-title">From <span class="dot-word">splats.</span><br />To <span class="gradient-text">solids.</span></h1>
         <p class="hero-copy">
-          Decode, rasterize, segment, name, transform, export, and mesh Gaussian scenes in one browser lab.
-          Start immediately with the shipped alarm-clock scene—no build step and no upload.
+          Decode a radiance field, discover its objects, edit them, and reconstruct a GLB mesh—all in one
+          browser lab. Start with the shipped alarm-clock scene; no build step and no scene upload.
         </p>
         <div class="actions">
           <a class="button button-primary" href="gaussian_splatting_webgpu/index.html">
@@ -742,9 +1482,16 @@
       </div>
     </section>
 
+    <div class="ticker" aria-label="Project capabilities">
+      <div class="ticker-track" aria-hidden="true">
+        <span>WebGPU rasterizer</span><span>Six Gaussian formats</span><span>Per-Gaussian identity</span><span>TSDF mesh</span><span>GLB export</span><span>Browser local</span>
+        <span>WebGPU rasterizer</span><span>Six Gaussian formats</span><span>Per-Gaussian identity</span><span>TSDF mesh</span><span>GLB export</span><span>Browser local</span>
+      </div>
+    </div>
+
     <section class="section shell" aria-labelledby="capabilities-title">
-      <div class="section-kicker">One continuous workflow</div>
-      <h2 class="section-heading" id="capabilities-title">Render a scene. Discover its structure. Make it yours.</h2>
+      <div class="section-kicker">01 / One continuous workflow</div>
+      <h2 class="section-heading" id="capabilities-title">Render it.<br />Understand it.<br />Make it physical.</h2>
       <p class="section-intro">
         The core path stays client-side. Web Workers handle the expensive graph and meshing stages while
         WebGPU handles sorting, rasterization, contribution tracking, picking, and readback.
@@ -769,13 +1516,14 @@
       </div>
     </section>
 
-    <section class="section shell" id="pipeline" aria-labelledby="pipeline-title">
+    <section class="section shell dark-band" id="pipeline" aria-labelledby="pipeline-title">
       <div class="pipeline-panel">
         <figure class="pipeline-figure">
           <img src="docs/figures/segmentation-pipeline.png" alt="Pipeline from a Gaussian scene through WebGPU rendering, segmentation, naming, editing, export, and meshing" loading="lazy" />
+          <figcaption>Figure 3 / Per-Gaussian segmentation, editing, and meshing architecture.</figcaption>
         </figure>
         <div>
-          <div class="section-kicker">F0–F6 architecture</div>
+          <div class="section-kicker">02 / F0–F6 architecture</div>
           <h2 class="section-heading" id="pipeline-title">A traceable object pipeline.</h2>
           <p class="section-intro">
             Every stage has a concrete browser module, deterministic test fixtures, and exportable artifacts.
@@ -792,8 +1540,85 @@
       </div>
     </section>
 
+    <section class="section shell paper-gallery" id="paper" aria-labelledby="paper-title">
+      <div class="gallery-heading">
+        <div>
+          <div class="section-kicker">Paper figures / System in context</div>
+          <h2 class="section-heading" id="paper-title">See the method.<br />See the result.</h2>
+        </div>
+        <div>
+          <p class="section-intro">
+            The technical report connects the browser implementation to the rendering, open-vocabulary,
+            editing, and reconstruction literature. These are its three core illustrations; Figure 3 appears above.
+          </p>
+          <a class="button" href="docs/open-vocab-3dgs-imagine-pipeline-paper.pdf">Read the full paper ↗</a>
+        </div>
+      </div>
+      <div class="paper-grid">
+        <figure class="paper-figure">
+          <img src="docs/figures/pipeline-flowchart.png" alt="Open-vocabulary 3D Gaussian Splatting and Imagine 2.0 pipeline from scene input to overlay, object stills, and catalog" loading="lazy" />
+          <figcaption>Figure 1 / Decode, rasterize, capture, tag, and turn recognized instances into a useful catalog.</figcaption>
+        </figure>
+        <figure class="paper-figure">
+          <img src="docs/figures/demo-potted-plants-pair.png" alt="Side-by-side comparison of a cropped 3D Gaussian Splatting render and an Imagine 2.0 edited object still of potted plants" loading="lazy" />
+          <figcaption>Figure 2 / A rasterized 3DGS crop beside its optional Imagine 2.0 presentation still.</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section class="section shell print-band" id="fabrication" aria-labelledby="fabrication-title">
+      <div class="print-layout">
+        <div class="print-heading">
+          <div>
+            <div class="section-kicker">03 / Fabrication path</div>
+            <h2 class="print-title" id="fabrication-title">Splat.<br />Mesh.<br />Print.</h2>
+          </div>
+          <p class="print-summary">
+            Yes—the lab makes the practical case from a Gaussian scene to a mesh-shaped GLB. A slicer-ready
+            print still needs a short external preparation step, so the boundary is explicit.
+          </p>
+        </div>
+
+        <div class="fabrication-path" aria-label="Gaussian splat to 3D print workflow">
+          <article class="fabrication-step">
+            <span class="step-id">01 / Isolate</span>
+            <h3>Gaussian object</h3>
+            <p>Select or segment one instance from a 3DGS or, preferably for geometry, a 2DGS/GOF scene.</p>
+          </article>
+          <article class="fabrication-step">
+            <span class="step-id">02 / Reconstruct</span>
+            <h3>Depth to surface</h3>
+            <p>Orbit cameras render depth and colour. TSDF fusion, empty-space carving, and surface nets recover a connected mesh.</p>
+          </article>
+          <article class="fabrication-step">
+            <span class="step-id">03 / Deliver</span>
+            <h3>GLB 2.0</h3>
+            <p>Download a binary glTF with normals and vertex colours directly from the browser’s Malla panel.</p>
+          </article>
+          <article class="fabrication-step">
+            <span class="step-id">04 / Prepare</span>
+            <h3>3D print</h3>
+            <p>Repair for watertightness, set real-world units, convert to STL/3MF if needed, then orient, slice, and print.</p>
+          </article>
+        </div>
+
+        <div class="mesh-metrics" aria-label="Measured alarm-clock mesh result">
+          <div class="mesh-metric"><strong>24</strong><span>Orbit views</span></div>
+          <div class="mesh-metric"><strong>96³</strong><span>TSDF voxels</span></div>
+          <div class="mesh-metric"><strong>24,866</strong><span>Triangles</span></div>
+          <div class="mesh-metric"><strong>0.75 MB</strong><span>GLB output</span></div>
+        </div>
+
+        <div class="print-note">
+          <strong>Geometry note</strong>
+          <span>Vanilla 3DGS can produce noisy or open surfaces. Use 2DGS/GOF input and validate the mesh before fabrication; one-click watertight repair and slicing are not implemented in this viewer.</span>
+          <a href="docs/open-vocab-3dgs-imagine-pipeline-paper.pdf#page=7">Method + measurements ↗</a>
+        </div>
+      </div>
+    </section>
+
     <section class="section shell" id="viewers" aria-labelledby="viewers-title">
-      <div class="section-kicker">Choose your renderer</div>
+      <div class="section-kicker">04 / Choose your renderer</div>
       <h2 class="section-heading" id="viewers-title">The full lab, plus focused fallbacks.</h2>
       <p class="section-intro">
         Use the WebGPU workspace for the complete pipeline, or open a smaller viewer when compatibility and inspection matter more than editing.
@@ -845,8 +1670,8 @@
       </div>
     </section>
 
-    <section class="section shell" aria-labelledby="before-title">
-      <div class="section-kicker">Before you launch</div>
+    <section class="section shell requirements-band" aria-labelledby="before-title">
+      <div class="section-kicker">05 / Before you launch</div>
       <h2 class="section-heading" id="before-title">Static by design. Local when it matters.</h2>
       <div class="notice">
         <article class="notice-block">
