@@ -110,6 +110,11 @@ Con GPU real el canvas sí funciona, pero las pruebas siguen usando *offscreen* 
 mismo conjunto pase en CI y en portátil. Más detalles sobre lanzar Chrome con Vulkan en
 [`webgpu-chrome.md`](webgpu-chrome.md).
 
+Para un perfil reproducible de la escena de demostración (adaptador, color,
+profundidad, K-buffer, grafo y malla), usa `npm run profile:webgpu`. En Linux/NVIDIA
+el perfil es dirigido por defecto porque Chromium headless puede no exponer el
+adaptador Vulkan. Resultados y variables opcionales: [performance.md](performance.md).
+
 ## Dónde quedan los resultados
 
 | Salida | Ruta |

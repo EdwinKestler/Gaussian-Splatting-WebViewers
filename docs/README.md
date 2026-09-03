@@ -5,6 +5,7 @@
 | [open-vocab-3dgs-imagine-pipeline-paper.md](open-vocab-3dgs-imagine-pipeline-paper.md) | Technical report: SAM 2.1 browser segmentation, editing, splat-to-mesh/GLB mathematics, fabrication handoff, figures, references and attributions |
 | [open-vocab-3dgs-imagine-pipeline-paper.pdf](open-vocab-3dgs-imagine-pipeline-paper.pdf) | Same report as PDF (regenerate after `npm ci`: `node scripts/render-report-pdf.mjs docs/open-vocab-3dgs-imagine-pipeline-paper.md docs/open-vocab-3dgs-imagine-pipeline-paper.pdf`; equations render with KaTeX) |
 | [plan-segmentacion-edicion-3dgs.md](plan-segmentacion-edicion-3dgs.md) | Plan: clustering, segmentación, clasificación, malla y edición de objetos sobre 3DGS (sin entrenamiento por escena) |
+| [performance.md](performance.md) | Perfiles reproducibles WebGPU/CPU, línea base RTX 3090 Ti y límites del backend SAM 2.1 |
 | [../setup.sh](../setup.sh) | One-shot machine setup (dirs, `.env`, dependency checks) |
 | [../models/README.md](../models/README.md) | Optional ONNX (SAM 2 / CLIP); `main` also uses `scripts/download-ml-models.sh` → `vendor/ml/` |
 | [pipeline.md](pipeline.md) | Operator workflow: stages F0–F6, HUD walkthrough, `artifacts/` layout, data files, sidecar endpoints |
