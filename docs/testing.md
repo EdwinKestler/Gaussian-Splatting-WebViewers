@@ -59,6 +59,8 @@ extremo (IoU > 0,9) y el esquema de `instancias.json`.
 ```bash
 npm run test:e2e                # npx playwright test
 ML_E2E=1 npx playwright test tests/e2e/f4-ml-browser.spec.mjs   # modelos en el navegador (pesos en vendor/ml/)
+# Sin vendor/ml/ el visor carga transformers.js desde jsDelivr y los pesos desde el Hub (misma
+# ruta que GaussForge sin vendor/): útil con red, imposible en un Chromium sin salida a Internet.
 npx playwright test --headed    # ver el navegador (requiere pantalla)
 npx playwright test -g "adapter"   # filtrar por título
 ```
