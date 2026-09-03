@@ -605,13 +605,12 @@ struct KParams {
   width: u32,
   height: u32,
   k: u32,
-  _pad: u32,
+  alpha_min: f32, // fragments below this alpha are not recorded (negligible α·T)
 };
 struct KEntry {
   index: u32, // gaussian index + 1
   alpha: f32,
   depth: f32, // view distance (-cam.z)
-  pad: u32,
 };
 @group(1) @binding(0) var<uniform> k_params: KParams;
 @group(1) @binding(1) var<storage, read_write> k_counts: array<atomic<u32>>;
@@ -620,7 +619,7 @@ struct KEntry {
 @fragment
 fn fs_contrib(input: VSOut) -> @location(0) vec4<f32> {
   let alpha = splat_alpha(input);
-  if (alpha < 0.0) {
+  if (alpha < 0.0 || alpha < k_params.alpha_min) {
     discard;
   }
   let px = u32(input.position.x);
@@ -631,7 +630,7 @@ fn fs_contrib(input: VSOut) -> @location(0) vec4<f32> {
   let pixel = py * k_params.width + px;
   let slot = atomicAdd(&k_counts[pixel], 1u);
   if (slot < k_params.k) {
-    k_entries[pixel * k_params.k + slot] = KEntry(input.v_index, alpha, input.v_aux.w, 0u);
+    k_entries[pixel * k_params.k + slot] = KEntry(input.v_index, alpha, input.v_aux.w);
   }
   return vec4<f32>(0.0);
 }

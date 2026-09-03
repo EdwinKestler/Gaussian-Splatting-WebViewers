@@ -1,5 +1,6 @@
 import { WebGPUSplatRenderer, MAX_INSTANCES, OUTPUT_MODE } from "./gpu-renderer.js";
 import { buildInstancesJson, labelsToBytes, liftViews } from "../shared/lift.js";
+import { applyNames, frameBounds, instanceBounds, searchInstances } from "../shared/naming.js";
 import { diffuseLabels, groupColor, indicesOfGroup, shDcToRgb } from "../shared/graph.js";
 import { labelColor } from "../shared/instances.js";
 import { makeTwoSpheres } from "../shared/synthetic.js";
@@ -280,6 +281,10 @@ class InstancePanel {
     /** @type {{label: number, name: string, index: number} | null} */
     this.selection = null;
     this.isolateLabel = 0;
+    /** Row actions handled outside the panel (F4: "name", "card"). */
+    this.onAction = null;
+    /** Labels highlighted by the text search (null = no filter). */
+    this.matches = null;
     this.listEl.addEventListener("click", (e) => this._onListClick(e));
   }
 
@@ -288,6 +293,7 @@ class InstancePanel {
     this.entries.clear();
     this.selection = null;
     this.isolateLabel = 0;
+    this.matches = null;
     this.renderer.resetInstances();
     this.renderer.setParams({ isolateLabel: 0 });
     this.setStatus("Seleccionada: ninguna");
@@ -411,6 +417,12 @@ class InstancePanel {
       return {
         label,
         name: e.name,
+        nombre: e.nombre || "",
+        nombre_es: e.nombre_es || "",
+        categoria: e.categoria || "",
+        confianza: Number.isFinite(e.confianza) ? e.confianza : null,
+        descripcion_es: e.descripcion_es || "",
+        error: e.error || "",
         count: e.count,
         visible: inst.visible,
         selected: inst.selected,
@@ -440,6 +452,7 @@ class InstancePanel {
     el.dataset.label = String(row.label);
     if (row.selected) el.classList.add("selected");
     if (!row.visible) el.classList.add("hidden");
+    if (this.matches) el.classList.add(this.matches.has(row.label) ? "match" : "dim");
     const button = (act, text, active) =>
       `<button type="button" data-act="${act}"${active ? ' class="active"' : ""}>${text}</button>`;
     el.innerHTML =
@@ -447,12 +460,21 @@ class InstancePanel {
       `<span class="inst-id">#${row.label}</span>` +
       `<span class="inst-name"></span>` +
       `<span class="inst-count">${formatCount(row.count)} gaussianas</span>` +
+      (row.categoria || row.error ? `<span class="inst-meta"></span>` : "") +
       `<div class="inst-btns">` +
       button("isolate", "Aislar", row.isolated) +
       button("hide", row.visible ? "Ocultar" : "Mostrar", !row.visible) +
       button("tint", "Teñir", row.tinted) +
+      button("name", "Nombrar", false) +
+      button("card", "Tarjeta", false) +
       `</div>`;
     el.querySelector(".inst-name").textContent = row.name;
+    const meta = el.querySelector(".inst-meta");
+    if (meta) {
+      meta.textContent = row.error
+        ? `sin nombre: ${row.error}`
+        : `${row.categoria}${row.confianza != null ? ` · ${Math.round(row.confianza * 100)} %` : ""}${row.nombre && row.nombre !== row.name ? ` · ${row.nombre}` : ""}`;
+    }
     return el;
   }
 
@@ -468,6 +490,22 @@ class InstancePanel {
     if (act.dataset.act === "isolate") this.isolate(label);
     else if (act.dataset.act === "hide") this.toggleHidden(label);
     else if (act.dataset.act === "tint") this.toggleTint(label);
+    else if (this.onAction) this.onAction(act.dataset.act, label);
+  }
+
+  /** Highlight the rows matching `query` (empty = clear); returns the matches best first. */
+  search(query) {
+    const q = String(query || "").trim();
+    if (!q) {
+      this.matches = null;
+      this.renderList();
+      return [];
+    }
+    const records = [...this.entries.entries()].map(([label, e]) => ({ label, ...e }));
+    const found = searchInstances(records, q);
+    this.matches = new Set(found.map((r) => r.label));
+    this.renderList();
+    return found;
   }
 }
 
@@ -815,8 +853,8 @@ async function main() {
   };
   /** Last lift: labels applied, names, per-view metadata (for instancias.json). */
   const seg = { last: null, running: false };
-  const SEG_K = 16;
-  const SEG_MAX_EDGE = 640;
+  const SEG_K = 24;
+  const SEG_MAX_EDGE = 512;
   const SEG_PITCH = 0.45;
 
   function setSegStatus(text, kind = "") {
@@ -1024,12 +1062,16 @@ async function main() {
 
   /** instancias.json + etiquetas.u32 for the current labels (plan §3.3). */
   function buildSegmentationExport() {
-    const l = seg.last;
-    if (!l) throw new Error("no hay segmentación que exportar");
+    if (!panel.entries.size) throw new Error("no hay instancias que exportar");
+    // Without a lift (e.g. promoted groups or the synthetic scene) the method is "manual".
+    const l = seg.last || { source: "manual", bias: null, iterations: 0, k: null, views: [] };
     const labels = renderer.getLabels();
-    const names = l.names.map((nm) => (nm ? { nombre: nm, nombre_es: nm } : ""));
+    const names = [];
     const colors = [];
-    for (let g = 1; g < l.names.length; g++) colors[g] = labelColor(g).map((v) => Math.round(v * 255));
+    for (const [label, e] of panel.entries) {
+      names[label] = { nombre: e.nombre || e.name, nombre_es: e.nombre_es || e.name, categoria: e.categoria || "", confianza: Number.isFinite(e.confianza) ? e.confianza : null };
+      colors[label] = labelColor(label).map((v) => Math.round(v * 255));
+    }
     const info = window.__gsViewer || {};
     const json = buildInstancesJson({
       escena: info.name || "escena",
@@ -1092,6 +1134,154 @@ async function main() {
     get last() {
       return summarizeSeg();
     },
+  };
+
+  // ---------------------------------------------------------- Nombrar (F4)
+
+  const nameEl = { button: $("inst-name"), status: $("inst-name-status"), search: $("inst-search") };
+  const naming = { running: false, crops: new Map() };
+  const CROP_EDGE = 512;
+
+  function setNameStatus(text, kind = "") {
+    nameEl.status.textContent = text;
+    nameEl.status.dataset.kind = kind;
+  }
+
+  /**
+   * Isolated render of one instance: camera framed on its bounds, only its
+   * gaussians drawn, opaque white background. Returns a PNG (base64).
+   */
+  async function renderInstanceCrop(label, edge = CROP_EDGE) {
+    if (!cloud) throw new Error("no hay escena cargada");
+    const bounds = instanceBounds(renderer.getLabels(), cloud.gaussians, label);
+    if (!bounds) throw new Error(`la instancia ${label} no tiene gaussianas`);
+    const frame = frameBounds(bounds, camera.fov, 1.4);
+    const saved = { target: camera.target.slice(), radius: camera.radius, isolate: renderer.params.isolateLabel };
+    camera.target = frame.target;
+    camera.radius = frame.radius;
+    camera.dampYaw = camera.dampPitch = camera.dampPanX = camera.dampPanY = camera.dampZoom = 0;
+    pushCamera();
+    renderer.setParams({ isolateLabel: label });
+    const W = edge;
+    const H = Math.max(64, Math.round((edge * canvas.height) / Math.max(canvas.width, 1)));
+    try {
+      const col = await renderer.renderOffscreen({ mode: OUTPUT_MODE.COLOR, width: W, height: H, clearColor: [1, 1, 1, 1] });
+      const png = await rgbaToPngB64(col.data, W, H);
+      naming.crops.set(label, { png, width: W, height: H, bounds });
+      return png;
+    } finally {
+      renderer.setParams({ isolateLabel: saved.isolate });
+      camera.target = saved.target;
+      camera.radius = saved.radius;
+      pushCamera();
+    }
+  }
+
+  /** Ask the sidecar to name instances (all registered ones by default). */
+  async function nameInstances({ labels: only = null, backend = null } = {}) {
+    const targets = only || [...panel.entries.keys()];
+    if (!targets.length) throw new Error("no hay instancias que nombrar");
+    if (naming.running) throw new Error("ya hay un nombrado en curso");
+    naming.running = true;
+    nameEl.button.disabled = true;
+    freezeFrame = true;
+    const t0 = performance.now();
+    try {
+      const health = await fetch(`${SIDECAR_URL}/health`);
+      if (!health.ok) throw new Error(`sidecar HTTP ${health.status}`);
+      const h = await health.json();
+      const chosen = backend || (h.name_backend === "mock" ? "mock" : "grok");
+      if (chosen === "grok" && !h.xai) throw new Error("el sidecar no tiene XAI_API_KEY");
+      const instances = [];
+      for (const label of targets) {
+        const entry = panel.entries.get(label);
+        if (!entry) continue;
+        setNameStatus(`Renderizando instancia ${label} aislada (${instances.length + 1}/${targets.length})…`);
+        instances.push({ id: label, hint: entry.nombre || (entry.name.startsWith("grupo") ? "" : entry.name), png_b64: await renderInstanceCrop(label) });
+      }
+      setNameStatus(`Nombrando ${instances.length} instancias con el sidecar (${chosen})…`);
+      const res = await fetch(`${SIDECAR_URL}/name`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instances, backend: chosen }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || `name ${res.status}`);
+      const { applied, failed } = applyNames(panel.entries, data.instances);
+      panel.renderList();
+      if (panel.selection) panel.select(panel.selection.label, panel.selection.index);
+      const ms = performance.now() - t0;
+      setNameStatus(`${applied} instancias nombradas${failed ? `, ${failed} sin nombre` : ""} · ${data.backend}${data.vision_model ? " · " + data.vision_model : ""} · ${ms.toFixed(0)} ms`, failed ? "err" : "ok");
+      console.info(`[nombres] ${applied} nombradas, ${failed} fallidas en ${ms.toFixed(0)} ms`, data.instances);
+      return { applied, failed, backend: data.backend, instances: data.instances };
+    } catch (err) {
+      const msg = String(err && err.message ? err.message : err);
+      const hint = /fetch|Failed|ECONNREFUSED|NetworkError/i.test(msg) ? " — arranca ./semantic_sidecar/launch.sh (puerto 8766)" : "";
+      setNameStatus(`Nombrado fallido: ${msg}${hint}`, "err");
+      throw err;
+    } finally {
+      freezeFrame = false;
+      naming.running = false;
+      nameEl.button.disabled = false;
+    }
+  }
+
+  /** Imagine card of one instance from its isolated crop, shown in the right panel with its id. */
+  async function cardForInstance(label) {
+    const entry = panel.entries.get(label);
+    if (!entry) throw new Error(`instancia ${label} desconocida`);
+    freezeFrame = true;
+    try {
+      setNameStatus(`Generando tarjeta Imagine de la instancia ${label}…`);
+      const png = await renderInstanceCrop(label);
+      const res = await fetch(`${SIDECAR_URL}/card`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ png_b64: png, name: entry.nombre || entry.name }),
+      });
+      const card = await res.json();
+      if (!res.ok || !card.ok) throw new Error(card.error || `card ${res.status}`);
+      const cards = $("sem-cards");
+      const fig = document.createElement("figure");
+      fig.dataset.label = String(label);
+      const src = card.b64 ? `data:${card.mime || "image/jpeg"};base64,${card.b64}` : card.url;
+      fig.innerHTML = `<img alt="" src="${src}" /><figcaption></figcaption>`;
+      fig.querySelector("img").alt = entry.name;
+      fig.querySelector("figcaption").textContent = `#${label} ${entry.name}${card.path ? ` · ${card.path}` : ""}`;
+      cards.prepend(fig);
+      setNameStatus(`Tarjeta de la instancia ${label} lista`, "ok");
+      return { label, path: card.path || null };
+    } catch (err) {
+      setNameStatus(`Tarjeta fallida: ${err.message}`, "err");
+      throw err;
+    } finally {
+      freezeFrame = false;
+    }
+  }
+
+  panel.onAction = (act, label) => {
+    if (act === "name") nameInstances({ labels: [label] }).catch(() => {});
+    else if (act === "card") cardForInstance(label).catch(() => {});
+  };
+  nameEl.button.addEventListener("click", () => nameInstances().catch(() => {}));
+  nameEl.search.addEventListener("input", () => panel.search(nameEl.search.value));
+  nameEl.search.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    const found = panel.search(nameEl.search.value);
+    if (found.length) panel.select(found[0].label);
+    else if (nameEl.search.value.trim()) panel.setStatus(`Sin resultados para «${nameEl.search.value.trim()}»`);
+  });
+
+  window.__gsNames = {
+    name: (options) => nameInstances(options),
+    card: (label) => cardForInstance(label),
+    crop: (label) => renderInstanceCrop(label),
+    search: (query, select = true) => {
+      const found = panel.search(query);
+      if (select && found.length) panel.select(found[0].label);
+      return found;
+    },
+    entries: () => panel.rows(),
   };
 
   worker.onmessage = (e) => {

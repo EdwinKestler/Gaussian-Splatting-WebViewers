@@ -21,3 +21,7 @@ ArtiFixer is not in this process: it needs a local 80GB-class GPU and NVIDIA non
   `grok-boxes` rasteriza las cajas de Grok vision como elipses (las cajas grandes primero). `sam` carga `SAM_BACKEND=paquete.modulo:funcion` desde `.env`; la función recibe `(imagen PIL, prompts)` y devuelve `(etiquetas HxW, objetos)`. Sin backend configurado responde 500 con un mensaje claro; los pesos de SAM 3 (licencia SAM) no se vendorizan.
 - `POST /segmentaciones` `{escena, instancias, etiquetas_b64}` guarda `instancias.json` y `etiquetas.u32` en `artifacts/segmentaciones/<escena>/<fecha>/`.
 
+## Nombres por instancia (F4)
+
+- `POST /name` `{instances:[{id, hint, png_b64}], backend:"grok"|"mock"}` → por instancia `{id_instancia, ok, nombre, nombre_es, categoria, confianza, descripcion_es}`. El visor envía el render aislado de cada instancia (fondo blanco). `NAME_BACKEND=mock` en `.env` devuelve nombres deterministas sin clave (para pruebas); una instancia fallida no pierde las demás (`ok:false` + `error`).
+

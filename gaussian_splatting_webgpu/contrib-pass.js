@@ -12,7 +12,7 @@
  * Exactness with bounded memory: the globally depth-sorted gaussian list is
  * drawn in contiguous chunks (front to back). For each chunk a fragment pass
  * (fs_contrib in gpu-renderer.js) appends (gaussian index + 1, alpha, depth)
- * to a fixed-size per-pixel list of K entries; a compute pass sorts each list
+ * to a fixed-size per-pixel list of K entries (12 bytes each, K ≤ 32); a compute pass sorts each list
  * by depth, continues the per-pixel transmittance carried over from the
  * previous chunks, atomicAdds fixed-point weights into a dense N × L_batch
  * contribution matrix, and updates the median depth. A chunk in which any
@@ -22,12 +22,17 @@
  */
 
 const WG = 256;
-export const KMAX = 16;
+export const KMAX = 32;
+export const DEFAULT_K = 24;
 export const CONTRIB_SCALE = 4096;
 /** Cap for the N × L_batch matrix (bytes); labels are batched to respect it. */
 const MAX_CONTRIB_BYTES = 64 * 1024 * 1024;
-/** First chunking of the sorted list; chunks halve on overflow and grow back after success. */
-const INITIAL_CHUNKS = 4;
+/** First chunking of the sorted list; chunks halve on overflow and grow back slowly after success. */
+const INITIAL_CHUNKS = 32;
+/** Growth factor after a chunk succeeds (kept low: a failed fill costs a draw + a sync). */
+const CHUNK_GROWTH = 1.25;
+/** Default alpha floor for recorded fragments (α·T below it is noise for the lift). */
+export const DEFAULT_ALPHA_MIN = 0.02;
 
 const RESOLVE_SHADER = /* wgsl */ `
 struct RParams {
@@ -44,7 +49,6 @@ struct KEntry {
   index: u32,
   alpha: f32,
   depth: f32,
-  pad: u32,
 };
 @group(0) @binding(0) var<uniform> p: RParams;
 @group(0) @binding(1) var<storage, read> counts: array<u32>;
@@ -174,8 +178,8 @@ export class ContributionPass {
   }
 
   /** (Re)allocate the per-pixel buffers for a resolution and K. */
-  _ensurePixelBuffers(width, height, k) {
-    if (this.width === width && this.height === height && this.k === k) return;
+  _ensurePixelBuffers(width, height, k, alphaMin) {
+    if (this.width === width && this.height === height && this.k === k && this.alphaMin === alphaMin) return;
     for (const name of ["countsBuffer", "entriesBuffer", "maskBuffer", "depthBuffer", "transBuffer", "pixelReadBuffer", "dummyTexture"]) {
       if (this[name]) {
         this[name].destroy();
@@ -186,7 +190,7 @@ export class ContributionPass {
     const pixels = width * height;
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
     this.countsBuffer = device.createBuffer({ size: align256(pixels * 4), usage: storage });
-    this.entriesBuffer = device.createBuffer({ size: align256(pixels * k * 16), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    this.entriesBuffer = device.createBuffer({ size: align256(pixels * k * 12), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.maskBuffer = device.createBuffer({ size: align256(pixels * 4), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.depthBuffer = device.createBuffer({ size: align256(pixels * 4), usage: storage });
     this.transBuffer = device.createBuffer({ size: align256(pixels * 4), usage: storage });
@@ -198,7 +202,11 @@ export class ContributionPass {
     this.width = width;
     this.height = height;
     this.k = k;
-    device.queue.writeBuffer(this.kParamsBuffer, 0, new Uint32Array([width, height, k, 0]));
+    this.alphaMin = alphaMin;
+    const kp = new ArrayBuffer(16);
+    new Uint32Array(kp, 0, 3).set([width, height, k]);
+    new Float32Array(kp, 12, 1)[0] = alphaMin;
+    device.queue.writeBuffer(this.kParamsBuffer, 0, kp);
     this.kBindGroup = device.createBindGroup({
       layout: this.kBindLayout,
       entries: [
@@ -243,17 +251,19 @@ export class ContributionPass {
 
   /**
    * Run the pass at the renderer's current camera.
-   * @param {{mask:Uint32Array, width:number, height:number, labelCount:number, k?:number}} opts
+   * @param {{mask:Uint32Array, width:number, height:number, labelCount:number, k?:number, alphaMin?:number}} opts
    *   mask: label per pixel (row-major, top-left origin), values < labelCount; 0 = fondo
    *   labelCount: number of columns of the result (label 0 included)
+   *   alphaMin: fragments with alpha below this are skipped (default DEFAULT_ALPHA_MIN; 0 = record all)
    * @returns {Promise<{count:number, labelCount:number, contrib:Float32Array, medianDepth:Float32Array,
    *   alpha:Float32Array, overflowPixels:number, width:number, height:number, k:number,
    *   batches:number, chunks:number, splits:number, camera:object}>}
    *   overflowPixels is always 0 (chunks split until no pixel exceeds K); splits counts the retries
    *   contrib[i * labelCount + l] = Σ α·T over pixels of label l (unscaled floats)
    */
-  async run({ mask, width, height, labelCount, k = 12 }) {
+  async run({ mask, width, height, labelCount, k = DEFAULT_K, alphaMin = DEFAULT_ALPHA_MIN }) {
     const r = this.renderer;
+    if (!Number.isFinite(alphaMin) || alphaMin < 0 || alphaMin >= 1) throw new Error(`alphaMin must be in [0, 1), got ${alphaMin}`);
     if (!isPosInt(width) || !isPosInt(height)) throw new Error(`invalid contribution size ${width}x${height}`);
     if (!isPosInt(k) || k > KMAX) throw new Error(`k must be an integer in [1, ${KMAX}], got ${k}`);
     if (!isPosInt(labelCount)) throw new Error(`labelCount must be a positive integer, got ${labelCount}`);
@@ -275,12 +285,13 @@ export class ContributionPass {
       width,
       height,
       k,
+      alphaMin,
       batches: 0,
       chunks: 0,
       splits: 0,
       camera: null,
     };
-    this._ensurePixelBuffers(width, height, k);
+    this._ensurePixelBuffers(width, height, k, alphaMin);
     this.device.queue.writeBuffer(this.maskBuffer, 0, mask);
 
     // camera exactly like renderOffscreen(): focal rescaled to the target size
@@ -361,7 +372,7 @@ export class ContributionPass {
         this.device.queue.submit([enc2.finish()]);
         result.chunks++;
         start = end;
-        if (!overflow && size < initialChunk) size = Math.min(initialChunk, size * 2);
+        if (size < initialChunk) size = Math.min(initialChunk, Math.ceil(size * CHUNK_GROWTH));
       }
       // ---- read the batch's columns (and, on the last batch, the per-pixel outputs)
       const last = base + cols >= labelCount;

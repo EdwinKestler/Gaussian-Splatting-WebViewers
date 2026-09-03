@@ -28,6 +28,9 @@ SEGMENT_DIR = ROOT / "artifacts" / "segmentaciones"
 # -> (labels: list[list[int]] | array HxW (0 = fondo, k = object k), objects: list[{"id", "name", ...}])
 SAM_BACKEND = os.environ.get("SAM_BACKEND", "")
 MAX_MASK_OBJECTS = 255
+# F4 naming backend: "grok" (vision VQA) or "mock" (deterministic, for tests without keys)
+NAME_BACKEND = os.environ.get("NAME_BACKEND", "grok")
+MAX_NAME_INSTANCES = 64
 HOST = os.environ.get("SIDECAR_HOST", "127.0.0.1")
 PORT = int(os.environ.get("SIDECAR_PORT", "8766"))
 XAI_BASE = "https://api.x.ai/v1"
@@ -64,6 +67,12 @@ box is normalized 0-1 [left, top, width, height] in the image.
 Prefer instance-level names (dining table, mesh office chair) over generic (object, thing).
 Prefer real-world labels even if the render is slightly blurry (garden bed, planter, foliage, wall, path).
 Only use name "unrecognized splat field" if there is no identifiable structure at all.
+"""
+
+NAME_PROMPT = """You see ONE object isolated from a 3D Gaussian Splatting scene (background removed).
+Name it. Return JSON only, no markdown:
+{"nombre":"short English name","nombre_es":"nombre corto en espanol","categoria":"one of: mobiliario, electrodomestico, decoracion, vegetacion, estructura, vehiculo, persona, animal, herramienta, alimento, otro","confianza":0.0,"descripcion_es":"una frase en espanol"}
+If it is not recognisable, use nombre "unrecognized fragment", nombre_es "fragmento sin identificar", categoria "otro", confianza <= 0.3.
 """
 
 CARD_PROMPT = (
@@ -364,6 +373,111 @@ def analyze(body: dict) -> dict:
     }
 
 
+# ----------------------------------------------------------------- F4 names
+
+NAME_CATEGORIES = {
+    "mobiliario", "electrodomestico", "decoracion", "vegetacion", "estructura", "vehiculo",
+    "persona", "animal", "herramienta", "alimento", "otro",
+}
+
+
+def clean_name_result(parsed: dict, hint: str) -> dict:
+    nombre = str(parsed.get("nombre") or hint or "objeto").strip()[:80]
+    nombre_es = str(parsed.get("nombre_es") or nombre).strip()[:80]
+    categoria = str(parsed.get("categoria") or "otro").strip().lower()
+    if categoria not in NAME_CATEGORIES:
+        categoria = "otro"
+    try:
+        confianza = max(0.0, min(1.0, float(parsed.get("confianza", 0.5))))
+    except (TypeError, ValueError):
+        confianza = 0.5
+    return {
+        "nombre": nombre,
+        "nombre_es": nombre_es,
+        "categoria": categoria,
+        "confianza": confianza,
+        "descripcion_es": str(parsed.get("descripcion_es") or "")[:200],
+    }
+
+
+def name_with_grok(image: Image.Image, hint: str) -> dict:
+    b64 = encode_png(image, 768)
+    data_url = f"data:image/png;base64,{b64}"
+    prompt = NAME_PROMPT + (f"Hint from a coarse detector: {hint}.\n" if hint else "")
+    payload = {
+        "model": VISION_MODEL,
+        "temperature": 0,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": data_url, "detail": "high"}},
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ],
+    }
+    resp = xai_request("/chat/completions", payload, timeout=180)
+    text = resp["choices"][0]["message"]["content"]
+    return clean_name_result(extract_json(text), hint)
+
+
+def name_with_mock(image: Image.Image, hint: str, index: int) -> dict:
+    """Deterministic names for tests: derived from the hint and the image mean colour."""
+    small = image.convert("RGB").resize((8, 8))
+    pixels = list(small.getdata())
+    mean = sum(sum(px) for px in pixels) / (3 * len(pixels))
+    tone = "claro" if mean > 128 else "oscuro"
+    base = hint or f"objeto {index}"
+    return clean_name_result(
+        {
+            "nombre": base,
+            "nombre_es": f"{base} ({tone})",
+            "categoria": "otro",
+            "confianza": 0.5,
+            "descripcion_es": f"nombre simulado (mock) para {base}",
+        },
+        hint,
+    )
+
+
+def name_instances(body: dict) -> dict:
+    """POST /name: {instances:[{id, hint, png_b64}], backend?} -> names per instance (plan F4)."""
+    items = (body.get("instances") or [])[:MAX_NAME_INSTANCES]
+    if not items:
+        raise RuntimeError("No instances provided")
+    backend = str(body.get("backend") or NAME_BACKEND)
+    if backend not in ("grok", "mock"):
+        raise RuntimeError(f"backend de nombres desconocido: {backend}")
+    out = []
+    for k, item in enumerate(items):
+        image = decode_png(item.get("png_b64") or "")
+        hint = str(item.get("hint") or "")[:80]
+        try:
+            if backend == "mock":
+                result = name_with_mock(image, hint, k + 1)
+            else:
+                result = name_with_grok(image, hint)
+            result["ok"] = True
+        except Exception as err:  # keep going: one failed instance must not lose the rest
+            result = {
+                "ok": False,
+                "error": str(err)[:300],
+                "nombre": hint or "",
+                "nombre_es": hint or "",
+                "categoria": "otro",
+                "confianza": 0.0,
+            }
+        result["id_instancia"] = int(item.get("id", k + 1))
+        out.append(result)
+    return {
+        "ok": True,
+        "backend": backend,
+        "vision_model": VISION_MODEL if backend == "grok" else None,
+        "instances": out,
+    }
+
+
 # ----------------------------------------------------------------- F3 masks
 
 
@@ -522,6 +636,7 @@ class Handler(BaseHTTPRequestHandler):
                     "imagine_model": IMAGINE_MODEL,
                     "img_output": str(OUTPUT_DIR),
                     "segment_backends": ["grok-boxes"] + (["sam"] if SAM_BACKEND else []),
+                    "name_backend": NAME_BACKEND,
                     "segmentaciones": str(SEGMENT_DIR),
                 },
             )
@@ -543,6 +658,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/analyze":
                 self._json(200, analyze(body))
+                return
+            if path == "/name":
+                self._json(200, name_instances(body))
                 return
             if path == "/segment":
                 self._json(200, segment_views(body))

@@ -212,6 +212,11 @@
     .inst-btns { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px; }
     .inst-btns button { padding: 3px 7px; font-size: 11px; }
     .inst-btns button.active { border-color: var(--accent); color: var(--accent); }
+    .inst-row.match { border-color: var(--warn); box-shadow: 0 0 0 1px rgba(255, 180, 84, 0.4); }
+    .inst-row.dim { opacity: 0.45; }
+    .inst-meta { grid-column: 2 / -1; color: var(--muted); font-size: 11px; }
+    #inst-name-status[data-kind="ok"] { color: var(--accent); }
+    #inst-name-status[data-kind="err"] { color: var(--err); }
   </style>
 </head>
 <body>
@@ -277,7 +282,12 @@
         <button id="syn-two-spheres" type="button">Escena sintética (2 esferas)</button>
         <button id="inst-show-all" type="button">Mostrar todo</button>
       </div>
+      <input id="inst-search" type="text" placeholder="Buscar instancia (nombre, categoría)… Intro selecciona" autocomplete="off" />
+      <div class="btns">
+        <button id="inst-name" type="button">Nombrar instancias (Grok)</button>
+      </div>
       <div id="inst-status">Seleccionada: ninguna</div>
+      <div id="inst-name-status" class="inst-hint"></div>
       <div id="inst-list"><div class="inst-empty">Sin instancias. Carga la escena sintética o un fichero con etiquetas.</div></div>
     </section>
     <section id="grp-panel">
