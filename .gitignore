@@ -11,10 +11,12 @@ semantic_sidecar/cache/
 img_output/**
 !img_output/README.md
 
-# Local captures / symlinks (keep demo.ply)
+# Local captures / large scenes (keep demo.ply and the shipped alarm-clock splat)
 gaussian_splatting_webgpu/model.splat
 gaussian_splatting_webgpu/trained.ply
-splats/
+splats/*
+!splats/README.md
+!splats/alarm_clock_generated.splat
 
 # Chrome scratch profiles
 .cache/

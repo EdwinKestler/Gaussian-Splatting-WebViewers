@@ -5,7 +5,8 @@ import { labelColor } from "../shared/instances.js";
 import { makeTwoSpheres } from "../shared/synthetic.js";
 
 const DEMO_PLY = "./demo.ply";
-const DEFAULT_SCENE = "../splats/model.splat";
+const DEFAULT_SCENE = "../splats/alarm_clock_generated.splat";
+const MODEL_SPLAT = "../splats/model.splat";
 const SIDECAR_URL = "http://127.0.0.1:8766";
 const SAMPLE_SPLAT =
   "https://huggingface.co/cakewalk/splat-data/resolve/main/train.splat";
@@ -1254,8 +1255,11 @@ async function main() {
   });
 
   $("load-demo").addEventListener("click", () => loadUrl(DEMO_PLY, "demo.ply"));
+  $("load-alarm").addEventListener("click", () =>
+    loadUrl(DEFAULT_SCENE, "alarm_clock_generated.splat")
+  );
   $("load-model").addEventListener("click", () =>
-    loadUrl(DEFAULT_SCENE, "model.splat")
+    loadUrl(MODEL_SPLAT, "model.splat")
   );
   $("load-train").addEventListener("click", () =>
     loadUrl(SAMPLE_SPLAT, "train.splat")
