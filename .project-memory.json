@@ -9,6 +9,7 @@
     "README.md",
     "AGENTS.md",
     "docs/**/*.md",
+    ".github/workflows/*.yml",
     "package.json",
     "playwright.config.mjs",
     "*.html",
@@ -142,6 +143,11 @@
       "mode": "search",
       "query": "instanceBounds frameBounds searchInstances applyNames nombre_es categoria",
       "expected_paths": ["shared/naming.js"]
+    },
+    {
+      "mode": "search",
+      "query": "Deploy GitHub Pages upload-pages-artifact github-pages environment id-token",
+      "expected_paths": [".github/workflows/pages.yml"]
     }
   ]
 }

@@ -33,6 +33,7 @@ models/**
 # Test tooling
 test-results/
 playwright-report/
+_site/
 
 # In-browser ML weights (scripts/download-ml-models.sh)
 vendor/ml/

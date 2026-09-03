@@ -10,6 +10,7 @@
 | [pipeline.md](pipeline.md) | Operator workflow: stages F0–F6, HUD walkthrough, `artifacts/` layout, data files, sidecar endpoints |
 | [webgpu-chrome.md](webgpu-chrome.md) | Linux WebGPU Chrome / Vulkan launch |
 | [testing.md](testing.md) | Pruebas unitarias (Node) y e2e (Playwright + Chromium WebGPU): comandos, flags, SwiftShader |
+| [GITHUB_PAGES.md](GITHUB_PAGES.md) | Publicación estática, allowlist del artefacto y límites del sidecar local |
 | [figures/pipeline-flowchart.png](figures/pipeline-flowchart.png) | Figure 1 (tagging + Imagine cards) |
 | [figures/segmentation-pipeline.png](figures/segmentation-pipeline.png) | Figure 3: segmentation, editing and meshing pipeline (plan F0–F6); source `figures/segmentation-pipeline.mmd`, rendered with `scripts/render-mermaid.mjs` |
 | [figures/demo-potted-plants-pair.png](figures/demo-potted-plants-pair.png) | Figure 2 (3DGS crop vs Imagine edit) |

@@ -3,93 +3,884 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="A WebGPU laboratory for viewing, segmenting, naming, editing, exporting, and meshing 3D Gaussian Splatting scenes in the browser." />
+  <meta name="theme-color" content="#07110f" />
+  <meta property="og:title" content="Gaussian Splatting Web Viewers" />
+  <meta property="og:description" content="From radiance fields to editable objects—inside the browser." />
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content="https://edwinkestler.github.io/Gaussian-Splatting-WebViewers/" />
+  <meta property="og:image" content="https://edwinkestler.github.io/Gaussian-Splatting-WebViewers/docs/figures/segmentation-pipeline.png" />
+  <link rel="canonical" href="https://edwinkestler.github.io/Gaussian-Splatting-WebViewers/" />
   <title>Gaussian Splatting Web Viewers</title>
   <style>
     :root {
-      --bg: #07090d;
-      --card: #121722;
-      --line: #243044;
-      --text: #eaf0f8;
-      --muted: #93a0b5;
-      --accent: #7ee0c8;
+      color-scheme: dark;
+      --bg: #06100e;
+      --bg-soft: #0a1714;
+      --panel: rgba(14, 31, 27, 0.78);
+      --panel-solid: #0e1f1b;
+      --line: rgba(180, 255, 225, 0.14);
+      --line-strong: rgba(180, 255, 225, 0.28);
+      --text: #effcf7;
+      --muted: #a5bdb4;
+      --mint: #75f0c6;
+      --mint-strong: #29c997;
+      --lime: #d6ff7f;
+      --blue: #7cb7ff;
+      --shadow: 0 30px 90px rgba(0, 0, 0, 0.35);
+      --radius: 24px;
+      --max: 1180px;
     }
-    * { box-sizing: border-box; }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
     body {
       margin: 0;
-      font: 16px/1.5 "Segoe UI", system-ui, sans-serif;
+      min-width: 320px;
+      font: 16px/1.6 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       background:
-        radial-gradient(1200px 600px at 10% -10%, #143347 0%, transparent 50%),
+        radial-gradient(circle at 10% 0%, rgba(41, 201, 151, 0.14), transparent 32rem),
+        radial-gradient(circle at 92% 18%, rgba(124, 183, 255, 0.11), transparent 28rem),
         var(--bg);
       color: var(--text);
     }
-    main { max-width: 980px; margin: 0 auto; padding: 56px 20px 80px; }
-    h1 { font-size: 34px; margin: 0 0 8px; }
-    .lede { color: var(--muted); max-width: 70ch; }
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-      gap: 16px;
-      margin-top: 32px;
-    }
-    a.card {
-      display: block;
-      background: var(--card);
-      border: 1px solid var(--line);
-      border-radius: 16px;
-      padding: 18px 18px 16px;
+
+    a {
       color: inherit;
-      text-decoration: none;
-      min-height: 170px;
     }
-    a.card:hover { border-color: var(--accent); }
-    a.card h2 { margin: 0 0 8px; font-size: 18px; }
-    a.card p { margin: 0; color: var(--muted); font-size: 14px; }
-    .tag {
-      display: inline-block;
-      margin-bottom: 10px;
-      font-size: 11px;
-      letter-spacing: 0.08em;
+
+    a:focus-visible {
+      outline: 3px solid var(--lime);
+      outline-offset: 4px;
+      border-radius: 8px;
+    }
+
+    code {
+      font: 0.88em/1.4 "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      color: var(--mint);
+    }
+
+    .shell {
+      width: min(calc(100% - 40px), var(--max));
+      margin-inline: auto;
+    }
+
+    .site-header {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      border-bottom: 1px solid rgba(180, 255, 225, 0.08);
+      background: rgba(6, 16, 14, 0.82);
+      backdrop-filter: blur(18px);
+    }
+
+    .nav {
+      min-height: 68px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+    }
+
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 11px;
+      text-decoration: none;
+      font-weight: 760;
+      letter-spacing: -0.02em;
+    }
+
+    .brand-mark {
+      width: 34px;
+      aspect-ratio: 1;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--line-strong);
+      border-radius: 11px;
+      background: linear-gradient(145deg, rgba(117, 240, 198, 0.18), rgba(124, 183, 255, 0.08));
+      color: var(--mint);
+      box-shadow: inset 0 0 20px rgba(117, 240, 198, 0.06);
+    }
+
+    .brand-mark svg {
+      width: 22px;
+      height: 22px;
+    }
+
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 22px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .nav-links a {
+      text-decoration: none;
+    }
+
+    .nav-links a:hover {
+      color: var(--text);
+    }
+
+    .hero {
+      padding: 92px 0 72px;
+      display: grid;
+      grid-template-columns: minmax(0, 1.05fr) minmax(340px, 0.95fr);
+      align-items: center;
+      gap: clamp(42px, 7vw, 92px);
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      margin-bottom: 20px;
+      color: var(--mint);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.14em;
       text-transform: uppercase;
-      color: var(--accent);
+    }
+
+    .eyebrow::before {
+      content: "";
+      width: 28px;
+      height: 1px;
+      background: currentColor;
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      margin-top: 0;
+    }
+
+    h1 {
+      max-width: 780px;
+      margin-bottom: 24px;
+      font-size: clamp(46px, 7vw, 82px);
+      line-height: 0.98;
+      letter-spacing: -0.06em;
+    }
+
+    .gradient-text {
+      background: linear-gradient(100deg, var(--mint) 0%, var(--lime) 48%, var(--blue) 100%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+
+    .hero-copy {
+      max-width: 660px;
+      margin-bottom: 30px;
+      color: var(--muted);
+      font-size: clamp(17px, 2vw, 20px);
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 32px;
+    }
+
+    .button {
+      min-height: 50px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 9px;
+      padding: 0 20px;
+      border: 1px solid var(--line-strong);
+      border-radius: 14px;
+      text-decoration: none;
+      font-weight: 750;
+      transition: transform 160ms ease, border-color 160ms ease, background 160ms ease;
+    }
+
+    .button:hover {
+      transform: translateY(-2px);
+      border-color: rgba(214, 255, 127, 0.58);
+    }
+
+    .button-primary {
+      border-color: transparent;
+      background: var(--mint);
+      color: #042119;
+      box-shadow: 0 14px 38px rgba(41, 201, 151, 0.22);
+    }
+
+    .button-secondary {
+      background: rgba(255, 255, 255, 0.025);
+    }
+
+    .facts {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .fact {
+      padding: 7px 11px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--muted);
+      background: rgba(255, 255, 255, 0.02);
+      font-size: 12px;
+    }
+
+    .scene-card {
+      position: relative;
+      min-height: 500px;
+      overflow: hidden;
+      border: 1px solid var(--line-strong);
+      border-radius: 32px;
+      background:
+        linear-gradient(180deg, rgba(4, 10, 9, 0.08), rgba(4, 10, 9, 0.76)),
+        radial-gradient(circle at 32% 35%, rgba(214, 255, 127, 0.32), transparent 10rem),
+        radial-gradient(circle at 68% 58%, rgba(124, 183, 255, 0.28), transparent 12rem),
+        #0b1916;
+      box-shadow: var(--shadow);
+      isolation: isolate;
+    }
+
+    .scene-grid {
+      position: absolute;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(180, 255, 225, 0.055) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(180, 255, 225, 0.055) 1px, transparent 1px);
+      background-size: 36px 36px;
+      transform: perspective(520px) rotateX(62deg) scale(1.4) translateY(32%);
+      transform-origin: bottom;
+      mask-image: linear-gradient(to top, #000, transparent 78%);
+    }
+
+    .splat {
+      position: absolute;
+      border-radius: 50%;
+      filter: blur(0.2px);
+      mix-blend-mode: screen;
+      animation: drift 7s ease-in-out infinite alternate;
+    }
+
+    .splat-a {
+      width: 250px;
+      height: 250px;
+      left: 10%;
+      top: 16%;
+      background:
+        radial-gradient(circle at 42% 35%, #f4ffbd 0 2%, transparent 3%),
+        radial-gradient(circle at 64% 52%, #75f0c6 0 1.8%, transparent 3%),
+        radial-gradient(circle at 38% 66%, #29c997 0 1.5%, transparent 3%),
+        repeating-radial-gradient(circle, rgba(117, 240, 198, 0.78) 0 1.4px, transparent 2.3px 8px);
+      box-shadow: 0 0 78px rgba(117, 240, 198, 0.26);
+    }
+
+    .splat-b {
+      width: 205px;
+      height: 205px;
+      right: 8%;
+      top: 38%;
+      animation-delay: -3s;
+      background:
+        radial-gradient(circle at 34% 38%, #e1f0ff 0 2%, transparent 3%),
+        radial-gradient(circle at 65% 63%, #7cb7ff 0 1.8%, transparent 3%),
+        repeating-radial-gradient(circle, rgba(124, 183, 255, 0.72) 0 1.3px, transparent 2.2px 7px);
+      box-shadow: 0 0 72px rgba(124, 183, 255, 0.23);
+    }
+
+    .scene-topbar,
+    .scene-caption {
+      position: absolute;
+      left: 20px;
+      right: 20px;
+      z-index: 2;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      color: #d9ebe4;
+      font-size: 12px;
+    }
+
+    .scene-topbar {
+      top: 18px;
+    }
+
+    .scene-caption {
+      bottom: 18px;
+      align-items: flex-end;
+    }
+
+    .live-dot {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+    }
+
+    .live-dot::before {
+      content: "";
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--mint);
+      box-shadow: 0 0 14px var(--mint);
+    }
+
+    .hud {
+      display: grid;
+      gap: 7px;
+      text-align: right;
+      color: var(--muted);
+    }
+
+    .hud strong {
+      color: var(--text);
+      font-size: 18px;
+      letter-spacing: -0.03em;
+    }
+
+    .section {
+      padding: 72px 0;
+    }
+
+    .section-kicker {
+      margin-bottom: 12px;
+      color: var(--mint);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+    }
+
+    .section-heading {
+      max-width: 760px;
+      margin-bottom: 18px;
+      font-size: clamp(32px, 5vw, 52px);
+      line-height: 1.06;
+      letter-spacing: -0.045em;
+    }
+
+    .section-intro {
+      max-width: 720px;
+      margin-bottom: 36px;
+      color: var(--muted);
+      font-size: 18px;
+    }
+
+    .capability-grid,
+    .viewer-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .card {
+      position: relative;
+      min-height: 275px;
+      padding: 24px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: linear-gradient(150deg, rgba(18, 42, 35, 0.8), rgba(9, 22, 19, 0.75));
+    }
+
+    .card::after {
+      content: "";
+      position: absolute;
+      width: 130px;
+      height: 130px;
+      right: -60px;
+      bottom: -64px;
+      border-radius: 50%;
+      background: var(--card-accent, var(--mint));
+      filter: blur(65px);
+      opacity: 0.2;
+      pointer-events: none;
+    }
+
+    .card-number {
+      display: inline-grid;
+      width: 38px;
+      height: 38px;
+      margin-bottom: 48px;
+      place-items: center;
+      border: 1px solid var(--line-strong);
+      border-radius: 12px;
+      color: var(--mint);
+      font: 700 12px/1 "SFMono-Regular", Consolas, monospace;
+    }
+
+    .card h3 {
+      margin-bottom: 10px;
+      font-size: 22px;
+      letter-spacing: -0.025em;
+    }
+
+    .card p {
+      margin-bottom: 0;
+      color: var(--muted);
+    }
+
+    .pipeline-panel {
+      display: grid;
+      grid-template-columns: minmax(0, 1.18fr) minmax(300px, 0.82fr);
+      gap: 28px;
+      align-items: center;
+      padding: clamp(22px, 4vw, 42px);
+      border: 1px solid var(--line);
+      border-radius: 30px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+
+    .pipeline-figure {
+      margin: 0;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: #f6faf8;
+    }
+
+    .pipeline-figure img {
+      display: block;
+      width: 100%;
+      height: auto;
+      border-radius: 10px;
+    }
+
+    .pipeline-list {
+      display: grid;
+      gap: 12px;
+      margin: 24px 0 0;
+      padding: 0;
+      list-style: none;
+      counter-reset: stage;
+    }
+
+    .pipeline-list li {
+      counter-increment: stage;
+      display: grid;
+      grid-template-columns: 32px 1fr;
+      gap: 11px;
+      align-items: start;
+      color: var(--muted);
+    }
+
+    .pipeline-list li::before {
+      content: counter(stage, decimal-leading-zero);
+      color: var(--mint);
+      font: 700 12px/1.6 "SFMono-Regular", Consolas, monospace;
+    }
+
+    .pipeline-list strong {
+      color: var(--text);
+    }
+
+    .viewer-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .viewer-card {
+      min-height: 0;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 18px;
+      align-items: center;
+      padding: 22px;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: rgba(255, 255, 255, 0.025);
+      text-decoration: none;
+      transition: transform 160ms ease, border-color 160ms ease, background 160ms ease;
+    }
+
+    .viewer-card:hover {
+      transform: translateY(-3px);
+      border-color: var(--line-strong);
+      background: rgba(117, 240, 198, 0.045);
+    }
+
+    .viewer-card h3 {
+      margin-bottom: 3px;
+      font-size: 19px;
+    }
+
+    .viewer-card p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .viewer-card .arrow {
+      width: 38px;
+      height: 38px;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--line);
+      border-radius: 50%;
+      color: var(--mint);
+      font-size: 20px;
+    }
+
+    .notice {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+    }
+
+    .notice-block {
+      padding: 26px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(255, 255, 255, 0.022);
+    }
+
+    .notice-block h3 {
+      margin-bottom: 10px;
+      font-size: 20px;
+    }
+
+    .notice-block p,
+    .notice-block li {
+      color: var(--muted);
+    }
+
+    .notice-block ul {
+      margin-bottom: 0;
+      padding-left: 20px;
+    }
+
+    .notice-block a {
+      color: var(--mint);
+    }
+
+    .site-footer {
+      padding: 34px 0 52px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .footer-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 24px;
+      flex-wrap: wrap;
+    }
+
+    .footer-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 18px;
+    }
+
+    .footer-links a:hover {
+      color: var(--text);
+    }
+
+    @keyframes drift {
+      from { transform: translate3d(-5px, 4px, 0) rotate(-2deg); }
+      to { transform: translate3d(10px, -8px, 0) rotate(3deg); }
+    }
+
+    @media (max-width: 900px) {
+      .hero,
+      .pipeline-panel {
+        grid-template-columns: 1fr;
+      }
+
+      .hero {
+        padding-top: 68px;
+      }
+
+      .scene-card {
+        min-height: 430px;
+      }
+
+      .capability-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .card {
+        min-height: 0;
+      }
+
+      .card-number {
+        margin-bottom: 28px;
+      }
+    }
+
+    @media (max-width: 660px) {
+      .shell {
+        width: min(calc(100% - 28px), var(--max));
+      }
+
+      .nav {
+        min-height: 62px;
+      }
+
+      .brand span:last-child,
+      .nav-links a:not(:last-child) {
+        display: none;
+      }
+
+      .hero {
+        padding: 54px 0 46px;
+      }
+
+      h1 {
+        font-size: clamp(42px, 14vw, 62px);
+      }
+
+      .scene-card {
+        min-height: 380px;
+      }
+
+      .splat-a {
+        width: 210px;
+        height: 210px;
+      }
+
+      .splat-b {
+        width: 170px;
+        height: 170px;
+      }
+
+      .viewer-grid,
+      .notice {
+        grid-template-columns: 1fr;
+      }
+
+      .section {
+        padding: 54px 0;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+
+      .splat {
+        animation: none;
+      }
+
+      .button,
+      .viewer-card {
+        transition: none;
+      }
     }
   </style>
 </head>
 <body>
+  <header class="site-header">
+    <nav class="nav shell" aria-label="Primary navigation">
+      <a class="brand" href="./" aria-label="Gaussian Splatting Web Viewers home">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none">
+            <circle cx="8" cy="9" r="3.5" stroke="currentColor" />
+            <circle cx="15.5" cy="14.5" r="4.5" stroke="currentColor" opacity=".7" />
+            <path d="M4 18.5 19.5 5" stroke="currentColor" stroke-linecap="round" opacity=".45" />
+          </svg>
+        </span>
+        <span>Gaussian Splatting Lab</span>
+      </a>
+      <div class="nav-links">
+        <a href="#pipeline">Pipeline</a>
+        <a href="#viewers">Viewers</a>
+        <a href="docs/open-vocab-3dgs-imagine-pipeline-paper.pdf">Report</a>
+        <a href="https://github.com/EdwinKestler/Gaussian-Splatting-WebViewers">GitHub ↗</a>
+      </div>
+    </nav>
+  </header>
+
   <main>
-    <h1>Gaussian Splatting Web Viewers</h1>
-    <p class="lede">
-      Browser viewers for 3D Gaussian Splatting. The WebGPU viewer is the recommended path:
-      it loads a trained INRIA <code>point_cloud.ply</code> (float covariance + SH0–3) and
-      rasterizes the Kerbl et al. radiance field on the GPU. Compact <code>.splat</code> files
-      are SH0 previews. The original Three.js and A-Frame demos are kept as WebGL fallbacks.
-    </p>
-    <div class="grid">
-      <a class="card" href="gaussian_splatting_webgpu/index.html">
-        <div class="tag">Recommended</div>
-        <h2>WebGPU viewer</h2>
-        <p>Full 3DGS: trained PLY with SH3, GPU sort, EWA ellipses. Drop point_cloud.ply from graphdeco-inria.</p>
-      </a>
-      <a class="card" href="gaussian_splatting_1/index.html">
-        <div class="tag">WebGL · Three.js</div>
-        <h2>Viewer 1</h2>
-        <p>Compact instanced-mesh renderer for the 32-byte splat format, now with PLY loading and resize fixes.</p>
-      </a>
-      <a class="card" href="gaussian_splatting_2_three.js/index.html">
-        <div class="tag">WebGL · Three.js</div>
-        <h2>Viewer 2</h2>
-        <p>Kellogg-style covariance pipeline with OrbitControls. Accepts PLY plus 32-byte and 44-byte splat files.</p>
-      </a>
-      <a class="card" href="gaussian_splatting_2_aframe/index.html">
-        <div class="tag">WebGL · A-Frame</div>
-        <h2>A-Frame component</h2>
-        <p>Drop gaussians into an A-Frame scene with meshes, WASD controls, and splat size / count sliders.</p>
-      </a>
-      <a class="card" href="splat_converter/index.html">
-        <div class="tag">Tool</div>
-        <h2>Converter</h2>
-        <p>Turn PLY into 32-byte or 44-byte splat files, or back to binary PLY, with importance downsampling.</p>
-      </a>
-    </div>
+    <section class="hero shell" aria-labelledby="hero-title">
+      <div>
+        <div class="eyebrow">WebGPU-native 3DGS workspace</div>
+        <h1 id="hero-title">From radiance fields to <span class="gradient-text">editable objects.</span></h1>
+        <p class="hero-copy">
+          Decode, rasterize, segment, name, transform, export, and mesh Gaussian scenes in one browser lab.
+          Start immediately with the shipped alarm-clock scene—no build step and no upload.
+        </p>
+        <div class="actions">
+          <a class="button button-primary" href="gaussian_splatting_webgpu/index.html">
+            Launch the WebGPU lab <span aria-hidden="true">→</span>
+          </a>
+          <a class="button button-secondary" href="#pipeline">Explore the pipeline</a>
+        </div>
+        <div class="facts" aria-label="Supported capabilities">
+          <span class="fact">PLY · SPLAT · SPZ · KSPLAT · SOG</span>
+          <span class="fact">SH degree 0–3</span>
+          <span class="fact">Runs locally in your browser</span>
+        </div>
+      </div>
+
+      <div class="scene-card" aria-label="Abstract Gaussian splat scene preview">
+        <div class="scene-grid" aria-hidden="true"></div>
+        <div class="splat splat-a" aria-hidden="true"></div>
+        <div class="splat splat-b" aria-hidden="true"></div>
+        <div class="scene-topbar">
+          <span class="live-dot">Browser pipeline</span>
+          <span>WebGPU · GPU sort</span>
+        </div>
+        <div class="scene-caption">
+          <span>Shipped scene<br /><strong>Alarm clock · 8 MB</strong></span>
+          <span class="hud"><span>Output</span><strong>Color · Depth · ID</strong></span>
+        </div>
+      </div>
+    </section>
+
+    <section class="section shell" aria-labelledby="capabilities-title">
+      <div class="section-kicker">One continuous workflow</div>
+      <h2 class="section-heading" id="capabilities-title">Render a scene. Discover its structure. Make it yours.</h2>
+      <p class="section-intro">
+        The core path stays client-side. Web Workers handle the expensive graph and meshing stages while
+        WebGPU handles sorting, rasterization, contribution tracking, picking, and readback.
+      </p>
+
+      <div class="capability-grid">
+        <article class="card">
+          <span class="card-number">01</span>
+          <h3>Decode & render</h3>
+          <p>Load six Gaussian formats through vendored GaussForge, preserve float covariance and SH, then render paper-style EWA ellipses with a GPU counting sort.</p>
+        </article>
+        <article class="card" style="--card-accent: var(--blue)">
+          <span class="card-number">02</span>
+          <h3>Segment & understand</h3>
+          <p>Build kNN superpoints, lift 2D masks into Gaussian labels with α·T contributions, name instances, and search them with optional CLIP embeddings.</p>
+        </article>
+        <article class="card" style="--card-accent: var(--lime)">
+          <span class="card-number">03</span>
+          <h3>Edit & deliver</h3>
+          <p>Select, transform, duplicate, hide, merge, and rename objects with a replayable operation log. Export PLY, SPLAT, SPZ, compressed PLY, or a GLB mesh.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section shell" id="pipeline" aria-labelledby="pipeline-title">
+      <div class="pipeline-panel">
+        <figure class="pipeline-figure">
+          <img src="docs/figures/segmentation-pipeline.png" alt="Pipeline from a Gaussian scene through WebGPU rendering, segmentation, naming, editing, export, and meshing" loading="lazy" />
+        </figure>
+        <div>
+          <div class="section-kicker">F0–F6 architecture</div>
+          <h2 class="section-heading" id="pipeline-title">A traceable object pipeline.</h2>
+          <p class="section-intro">
+            Every stage has a concrete browser module, deterministic test fixtures, and exportable artifacts.
+          </p>
+          <ol class="pipeline-list">
+            <li><span><strong>Decode</strong> into 12-float Gaussians plus SH coefficients.</span></li>
+            <li><span><strong>Rasterize</strong> color, depth, normal, ID, and contribution buffers.</span></li>
+            <li><span><strong>Group</strong> Gaussians into graph-based superpoints.</span></li>
+            <li><span><strong>Lift</strong> masks across views into persistent 3D instances.</span></li>
+            <li><span><strong>Name and edit</strong> with undoable, replayable operations.</span></li>
+            <li><span><strong>Export or mesh</strong> the selected object or visible scene.</span></li>
+          </ol>
+        </div>
+      </div>
+    </section>
+
+    <section class="section shell" id="viewers" aria-labelledby="viewers-title">
+      <div class="section-kicker">Choose your renderer</div>
+      <h2 class="section-heading" id="viewers-title">The full lab, plus focused fallbacks.</h2>
+      <p class="section-intro">
+        Use the WebGPU workspace for the complete pipeline, or open a smaller viewer when compatibility and inspection matter more than editing.
+      </p>
+
+      <div class="viewer-grid">
+        <a class="viewer-card" href="gaussian_splatting_webgpu/index.html">
+          <span>
+            <h3>WebGPU workspace</h3>
+            <p>Full 3DGS, identity, segmentation, naming, editing, export, and meshing.</p>
+          </span>
+          <span class="arrow" aria-hidden="true">→</span>
+        </a>
+        <a class="viewer-card" href="gaussian_splatting_1/index.html">
+          <span>
+            <h3>Compact Three.js viewer</h3>
+            <p>A lightweight WebGL path for 32-byte SPLAT and PLY scenes.</p>
+          </span>
+          <span class="arrow" aria-hidden="true">→</span>
+        </a>
+        <a class="viewer-card" href="gaussian_splatting_2_three.js/index.html">
+          <span>
+            <h3>Covariance viewer</h3>
+            <p>Kellogg-style WebGL rendering with 32-byte and 44-byte support.</p>
+          </span>
+          <span class="arrow" aria-hidden="true">→</span>
+        </a>
+        <a class="viewer-card" href="gaussian_splatting_2_aframe/index.html">
+          <span>
+            <h3>A-Frame component</h3>
+            <p>Place Gaussian scenes in an A-Frame world with familiar controls.</p>
+          </span>
+          <span class="arrow" aria-hidden="true">→</span>
+        </a>
+        <a class="viewer-card" href="splat_converter/index.html">
+          <span>
+            <h3>Format converter</h3>
+            <p>Convert PLY and both SPLAT layouts directly on your device.</p>
+          </span>
+          <span class="arrow" aria-hidden="true">→</span>
+        </a>
+        <a class="viewer-card" href="docs/open-vocab-3dgs-imagine-pipeline-paper.pdf">
+          <span>
+            <h3>Technical report</h3>
+            <p>Methods, measured results, pipeline diagrams, references, and licenses.</p>
+          </span>
+          <span class="arrow" aria-hidden="true">↗</span>
+        </a>
+      </div>
+    </section>
+
+    <section class="section shell" aria-labelledby="before-title">
+      <div class="section-kicker">Before you launch</div>
+      <h2 class="section-heading" id="before-title">Static by design. Local when it matters.</h2>
+      <div class="notice">
+        <article class="notice-block">
+          <h3>Browser requirements</h3>
+          <ul>
+            <li>A recent Chrome or Edge release with WebGPU enabled.</li>
+            <li>The included 8 MB compact scene loads automatically.</li>
+            <li>Drop your own trained <code>point_cloud.ply</code> for full SH3 rendering.</li>
+            <li>SAM 2.1 and CLIP may download weights from their public providers.</li>
+          </ul>
+        </article>
+        <article class="notice-block">
+          <h3>Optional local sidecar</h3>
+          <p>
+            Grok vision, instance naming, Imagine cards, and saving artifacts require the loopback Python
+            sidecar. It is never deployed to GitHub Pages, and your <code>XAI_API_KEY</code> never reaches this site.
+          </p>
+          <p>
+            <a href="https://github.com/EdwinKestler/Gaussian-Splatting-WebViewers/blob/main/semantic_sidecar/README.md">Sidecar setup on GitHub ↗</a>
+          </p>
+        </article>
+      </div>
+    </section>
   </main>
+
+  <footer class="site-footer">
+    <div class="footer-row shell">
+      <span>Gaussian Splatting Web Viewers · MIT licensed</span>
+      <span class="footer-links">
+        <a href="https://github.com/EdwinKestler/Gaussian-Splatting-WebViewers">Source</a>
+        <a href="https://github.com/EdwinKestler/Gaussian-Splatting-WebViewers/blob/main/docs/pipeline.md">Pipeline notes</a>
+        <a href="LICENSE">License</a>
+      </span>
+    </div>
+  </footer>
 </body>
 </html>

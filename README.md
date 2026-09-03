@@ -2,6 +2,8 @@
 
 Experimental browser viewers for [3D Gaussian Splatting for Real-Time Radiance Field Rendering](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/).
 
+**Live browser demo:** [edwinkestler.github.io/Gaussian-Splatting-WebViewers](https://edwinkestler.github.io/Gaussian-Splatting-WebViewers/) · [GitHub Pages deployment notes](docs/GITHUB_PAGES.md)
+
 The original Three.js and A-Frame demos are still here. A new **WebGPU 3DGS viewer** uses [GaussForge](https://github.com/3dgscloud/GaussForge) to decode PLY / SPLAT / SPZ / KSPLAT / SOG, then sorts and rasterizes on the GPU. GaussForge is vendored under `vendor/gaussforge/` (Apache-2.0, single-file WASM build), so the viewer decodes every format without network access; the jsDelivr copy is only a fallback.
 
 On a new machine:
@@ -120,7 +122,7 @@ Optional **open-vocab tags** and **Imagine 2.0 object cards**: start `./semantic
 
 ```bash
 npm install          # @playwright/test 1.56.1 (browsers are not downloaded)
-npm test             # 107 Node unit tests for shared/{splat-io,graph,lift,naming,edit-ops,export-io,tsdf,schemas}.js and ml-browser helpers
+npm test             # 110 Node unit tests for shared/{splat-io,graph,lift,naming,edit-ops,export-io,tsdf,schemas}.js and ml-browser helpers
 npm run test:e2e     # 22 Playwright tests on Chromium WebGPU (SwiftShader when no GPU), offscreen rendering only
 ML_E2E=1 npx playwright test tests/e2e/f4-ml-browser.spec.mjs   # opt-in: SAM 2.1 + CLIP in the browser (after scripts/download-ml-models.sh)
 ```
