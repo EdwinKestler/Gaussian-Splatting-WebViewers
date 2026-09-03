@@ -2,7 +2,7 @@
 
 **Technical report · implementation note**  
 Gaussian Splatting Web Viewers — WebGPU path  
-2 September 2026 · revised 3 September 2026 (reciprocal multi-view association, real-GPU profile, topology repair and 3MF)
+2 September 2026 · revised 3 September 2026 (reciprocal multi-view association, real-GPU profile, topology repair, complete-scene export, and “From Splats to Solids” 3MF derivation)
 
 PDF: [open-vocab-3dgs-imagine-pipeline-paper.pdf](open-vocab-3dgs-imagine-pipeline-paper.pdf) · operator notes: [pipeline.md](pipeline.md)
 
@@ -129,7 +129,7 @@ A demo crop of potted plants on a nursery table (Figure 2) was rasterized in the
 
 ## 6. Per-Gaussian segmentation, editing and meshing (plan F0–F6)
 
-The tagging pipeline of Sections 3–5 labels *views*. The segmentation plan [`plan-segmentacion-edicion-3dgs.md`](plan-segmentacion-edicion-3dgs.md) adds per-Gaussian instances, editing and meshing on top of the same rasterizer, without any per-scene training. Figure 3 shows the data flow; Section 6.1 summarizes the stages, Sections 6.2–6.4 give implementation details and equations, and Section 6.5 records measured results.
+The tagging pipeline of Sections 3–5 labels *views*. The segmentation plan [`plan-segmentacion-edicion-3dgs.md`](plan-segmentacion-edicion-3dgs.md) adds per-Gaussian instances, editing and meshing on top of the same rasterizer, without any per-scene training. Figure 3 shows the data flow; Section 6.1 summarizes the stages, Section 6.2 explains browser SAM, Section 6.3 follows the complete “From Splats to Solids” geometry chain, Section 6.4 isolates the 3MF fabrication handoff, and Section 6.5 records measured results.
 
 ![Figure 3. Segmentation, editing and meshing pipeline](figures/segmentation-pipeline.png)
 
@@ -180,9 +180,90 @@ keeping the higher-score mask. The remaining masks are painted from largest to s
 
 The pure mask operations are covered by `tests/unit/ml-browser.test.mjs`. The opt-in `ML_E2E=1` browser test additionally loads the real model, checks two-view SAM lift on the two-sphere scene, and verifies CLIP search; it is kept outside the default suite because it requires downloaded weights and takes minutes under software rendering.
 
-### 6.3 Splat-to-mesh, GLB and 3MF calculations
+### 6.3 From Splats to Solids: workflow and mathematics
 
-F6 does not triangulate Gaussian centres. It frames either one isolated instance or the complete visible scene, renders depth/alpha/colour from multiple cameras, reconstructs an implicit signed-distance field, and extracts its zero level set. The following equations match `shared/naming.js`, `shared/tsdf.js`, `shared/tsdf-worker.js`, `shared/mesh-ops.js`, `shared/glb.js` and `shared/three-mf.js`.
+“From Splats to Solids” names the implemented geometry branch, not a claim that a radiance field is already a printable solid. F6 does **not** connect Gaussian centres with triangles. It selects one instance or the complete visible scene, renders calibrated depth evidence, integrates that evidence into an implicit signed-distance field, extracts a triangle surface, repairs and validates the surface, maps it into millimetres, and only then serializes a 3MF model:
+
+$$
+\begin{aligned}
+\mathcal G_T
+&\xrightarrow{\text{WebGPU orbit renders}}
+\{D_j,A_j,C_j,P_j,V_j\}_{j=1}^{M} \\
+&\xrightarrow{\text{TSDF fusion}}
+F:\mathbb R^3\rightarrow[-1,1]
+\xrightarrow{F=0}
+(\mathcal V,\mathcal F) \\
+&\xrightarrow{\text{repair + gate}}
+(\mathcal V^*,\mathcal F^*)
+\xrightarrow{\text{mm transform + OPC}}
+\texttt{scene.3mf}.
+\end{aligned}
+$$
+
+| 01 · WebGPU 3DGS render | 02 · Object-card render | 03 · Complete-scene 3MF in Cura |
+| --- | --- | --- |
+| ![Alarm-clock splat render](figures/workflow-alarm-clock-splat.png) | ![Alarm-clock object render](figures/workflow-alarm-clock-render.jpg) | ![Alarm-clock 3MF opened in Cura](figures/workflow-alarm-clock-slicer.png) |
+
+*Figure 4. Three artifacts from the same alarm-clock run. The middle studio still is the optional semantic/presentation branch; it is **not** fed into meshing. The 3MF at right comes only from calibrated WebGPU depth/alpha/colour renders of the Gaussian scene. Cura demonstrates slicer ingestion, not a completed physical print.*
+
+| Step | Mathematical operation | Runtime artifact |
+| --- | --- | --- |
+| Target | Choose visible Gaussian indices and apply their instance transforms | isolated instance or complete visible scene |
+| Measure | Project anisotropic Gaussians and composite front-to-back alpha, colour and depth | $M$ calibrated depth/alpha/colour maps |
+| Fuse | Accumulate weighted truncated signed distances in an $n^3$ grid | scalar field $F$ plus colour weights |
+| Extract | Interpolate $F=0$ crossings in a consistent six-tetrahedra cube decomposition | vertices $\mathcal V$, triangle indices $\mathcal F$ |
+| Repair | Weld near-coincident vertices, remove invalid faces, orient winding and fill bounded simple loops | repaired mesh $(\mathcal V^*,\mathcal F^*)$ |
+| Gate | Require finite non-degenerate geometry, two oppositely oriented faces per edge and non-zero signed volume | accepted or blocked 3MF export |
+| Deliver | Scale the longest axis to the requested millimetres, translate to the build plane and package Core 3MF XML in OPC ZIP | `*_instancia-<id>.3mf` or `*_escena.3mf` |
+
+The following equations match `gaussian_splatting_webgpu/gpu-renderer.js`, `main.js`, `shared/naming.js`, `shared/tsdf.js`, `shared/tsdf-worker.js`, `shared/mesh-ops.js` and `shared/three-mf.js`.
+
+**Targeted Gaussian field and depth evidence.** Let Gaussian $i$ have centre $\boldsymbol\mu_i$, opacity $o_i$, rotation $R_i$ and axis scales $\mathbf s_i$. Its covariance is
+
+$$
+\Sigma_i=R_i\,\operatorname{diag}(\mathbf s_i^2)R_i^\top.
+$$
+
+For instance scope with label $\ell$, the target index set is $\mathcal I_T=\{i:\operatorname{label}(i)=\ell\}$; for complete-scene scope it is every index whose instance is currently visible. The renderer applies each instance transform before projection. Under camera $j$, the EWA screen covariance and per-pixel opacity are
+
+$$
+C_{ij}=J_{ij}W_j\Sigma_iW_j^\top J_{ij}^\top,
+\qquad
+\alpha_{ij}(\mathbf p)=\min\!\left(0.99,\;o_i\exp\left[-\tfrac12\boldsymbol\delta_{ij}^\top C_{ij}^{-1}\boldsymbol\delta_{ij}\right]\right),
+$$
+
+where $\boldsymbol\delta_{ij}=\mathbf p-\pi_j(\boldsymbol\mu_i)$ and the splats are ordered front-to-back. Their transmittance and contribution weights are
+
+$$
+T_{ij}(\mathbf p)=\prod_{k<i}\left(1-\alpha_{kj}(\mathbf p)\right),
+\qquad
+w_{ij}(\mathbf p)=T_{ij}(\mathbf p)\alpha_{ij}(\mathbf p).
+$$
+
+The offscreen pass produces premultiplied colour and total alpha,
+
+$$
+\mathbf C_j(\mathbf p)=\sum_i w_{ij}(\mathbf p)\mathbf c_{ij},
+\qquad
+A_j(\mathbf p)=1-\prod_i\left(1-\alpha_{ij}(\mathbf p)\right).
+$$
+
+Its fast depth is the alpha-weighted mean
+
+$$
+D_j^{\mathrm{mean}}(\mathbf p)=
+\frac{\sum_i w_{ij}(\mathbf p)z_{ij}}{\sum_i w_{ij}(\mathbf p)},
+$$
+
+while the exact 2DGS-style K-buffer option returns the first ordered depth whose accumulated opacity reaches one half,
+
+$$
+D_j^{50}(\mathbf p)=z_{mj},
+\qquad
+m=\min\left\{q:1-\prod_{i\le q}(1-\alpha_{ij}(\mathbf p))\ge\tfrac12\right\}.
+$$
+
+These depth maps—not the optional Imagine still—are the measurements fused into the solid proxy.
 
 **Bounds and orbit.** For an axis-aligned instance box with diagonal length $d_b$, the untransformed bounding-sphere radius is $r=d_b/2$. After an F5 affine transform, the implementation multiplies $r$ by the largest norm of the transform's three linear columns. With vertical field of view $\phi$ and framing margin $m_f=1.5$, the orbit distance is
 
@@ -237,7 +318,7 @@ t_{ab}=\frac{F_a}{F_a-F_b},\qquad
 \mathbf x_{ab}=\mathbf x_a+t_{ab}(\mathbf x_b-\mathbf x_a).
 $$
 
-The cell vertex is the mean of its edge crossings. A finite-difference gradient of the eight corner values supplies the outward normal; quads around sign-changing grid edges become two triangles, winding is corrected against those normals, and only the connected component with the most triangles is retained. The diagnostic Euler characteristic is $\chi=V-E+F$; the analytic connected sphere test gives $\chi=2$, as expected for a closed genus-zero surface.
+The cell vertex is the mean of its edge crossings. A finite-difference gradient of the eight corner values supplies the outward normal; quads around sign-changing grid edges become two triangles and winding is corrected against those normals. Instance scope normally retains the component with the most triangles; complete-scene scope sets `keepAll` and preserves disconnected visible objects. The diagnostic Euler characteristic is $\chi=V-E+F$; the analytic connected sphere test gives $\chi=2$, as expected for a closed genus-zero surface.
 
 **Print remesh and topology.** Surface nets stays the faster GLB path, but ambiguous voxel junctions can place more than two triangles on an edge. For 3MF, each cube is therefore split consistently into six tetrahedra around its body diagonal. A tetrahedron with one or three negative TSDF samples yields one triangle; a two/two sign split yields a quadrilateral split into two triangles. Crossings reuse the same interpolated vertex for each global grid edge, so adjacent cells agree on their boundary [37]. The repair pass then welds positions within $\varepsilon_w=10^{-6}d_b$ (with a $10^{-9}$ floor), removes invalid, duplicate and zero-area triangles, propagates consistent face orientation over edge adjacency, fills only simple boundary loops with at most 64 edges, and recomputes vertex normals.
 
@@ -275,7 +356,37 @@ $$
 
 where $\mathbf b_{\min}$ is the minimum box corner. This makes all coordinates non-negative and places the lowest point on the $z=0$ build plane. The 3MF model declares `unit="millimeter"`; scene coordinates are not presented as physically calibrated measurements.
 
-`shared/three-mf.js` emits an OPC ZIP package with `[Content_Types].xml`, `_rels/.rels`, and `3D/3dmodel.model`; the root relationship targets the 3D model, whose resources contain one mesh object and whose build section references it, as required by 3MF Core [35]. The package uses uncompressed ZIP entries for deterministic, dependency-free generation and one average base material colour; GLB remains the format that preserves per-vertex colours.
+The similarity transform has predictable dimensional effects. If $A_{\mathrm{scene}}$ and $V_{\mathrm{scene}}$ are the triangle area and enclosed signed-volume magnitude before scaling, then
+
+$$
+A_{\mathrm{mm}^2}=s_{\mathrm{mm}}^2A_{\mathrm{scene}},
+\qquad
+V_{\mathrm{mm}^3}=s_{\mathrm{mm}}^3V_{\mathrm{scene}}.
+$$
+
+For the synthetic single-sphere acceptance case, the repaired source bounding box has longest side $1.136371$ scene units. Requesting $80$ mm therefore gives
+
+$$
+s_{\mathrm{mm}}=\frac{80}{1.136371}=70.3995\ \mathrm{mm/scene\ unit},
+$$
+
+and the serialized bounding box is approximately $78.60\times80.00\times78.32$ mm. This is a requested display/print scale, not recovered real-world calibration.
+
+`shared/three-mf.js` does not create new geometry. It serializes each validated millimetre-space vertex $\mathbf p_v=(x_v,y_v,z_v)$ as a `<vertex>` and every triangle $(a_t,b_t,c_t)$ as index references `<triangle v1="a_t" v2="b_t" v3="c_t">`. Coordinates are written with nine significant digits. The single 3MF base-material colour is the clamped vertex-colour mean
+
+$$
+\bar{\mathbf c}=\frac1{|\mathcal V^*|}\sum_{v\in\mathcal V^*}\operatorname{clamp}(\mathbf c_v,0,1),
+$$
+
+quantized to 8-bit RGB; GLB remains the format that preserves per-vertex colours.
+
+The writer emits an OPC ZIP package with `[Content_Types].xml`, `_rels/.rels`, and `3D/3dmodel.model`; the root relationship targets the 3D model, whose resources contain one mesh object and whose build section references it, as required by 3MF Core [35]. The three entries use ZIP method 0 (STORE) for deterministic, dependency-free generation. If entry $k$ has UTF-8 filename length $n_k$ and data length $d_k$, the exact container size produced by this writer is
+
+$$
+B_{\mathrm{3MF}}=22+\sum_{k=1}^{3}\left[(30+n_k+d_k)+(46+n_k)\right],
+$$
+
+where 30 and 46 bytes are the local and central-directory headers and 22 bytes is the end-of-central-directory record. XML size dominates and varies with the decimal coordinates and index counts.
 
 After validation, a closed oriented triangle mesh can provide a solid-volume estimate through signed tetrahedra,
 
@@ -284,7 +395,13 @@ V_{\mathrm{mesh}}=\left|\frac16\sum_{(a,b,c)}\mathbf p_a\cdot(\mathbf p_b\times\
 \qquad m_{\mathrm{material}}\approx \rho V_{\mathrm{mesh}},
 $$
 
-before infill and support corrections. The implementation reports signed volume and surface area but does **not** test self-intersections, minimum wall thickness, overhangs, supports, shrinkage, material/process parameters, slicer compatibility, printer control or a physical part. Accordingly, “topology-gated 3MF” means a closed oriented triangle complex at the requested scale, not a certified printable object.
+before infill and support corrections. Its triangle surface area is
+
+$$
+A_{\mathrm{mesh}}=\frac12\sum_{(a,b,c)}\left\|(\mathbf p_b-\mathbf p_a)\times(\mathbf p_c-\mathbf p_a)\right\|.
+$$
+
+The implementation reports signed volume and surface area but does **not** test self-intersections, minimum wall thickness, overhangs, supports, shrinkage, material/process parameters, slicer compatibility, printer control or a physical part. Accordingly, “topology-gated 3MF” means a closed oriented triangle complex at the requested scale, not a certified printable object.
 
 ### 6.5 Results (software CI and a real RTX 3090 Ti profile)
 
@@ -517,6 +634,7 @@ Segmentation, editing and meshing (Section 6): HUD panels **Grupos** → **Segme
 | `index.html`, `.github/workflows/pages.yml`, `scripts/build-pages.sh` | Public project page, allowlisted artifact build and GitHub Pages deployment |
 | `docs/figures/pipeline-flowchart.png` | Figure 1 |
 | `docs/figures/demo-potted-plants-pair.png` | Figure 2 |
+| `docs/figures/workflow-alarm-clock-{splat,render,slicer}.*` | Figure 4, real-run “From Splats to Solids” triptych |
 | `docs/open-vocab-3dgs-imagine-pipeline-paper.md` | This report (Markdown) |
 | `scripts/render-report-pdf.mjs`, `docs/open-vocab-3dgs-imagine-pipeline-paper.pdf` | KaTeX/Marked/Chromium renderer and generated PDF |
 
