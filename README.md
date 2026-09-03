@@ -16,7 +16,7 @@ cd Gaussian-Splatting-WebViewers
 ./setup.sh --all           # sidecar + tests + e2e
 ```
 
-`splats/` is gitignored — copy a `.splat` or trained `point_cloud.ply` into `splats/` (or drop a file in the viewer). `gaussian_splatting_webgpu/demo.ply` ships with the repo.
+Shipped compact demo: `splats/alarm_clock_generated.splat` (~8 MB). Other files under `splats/` stay gitignored — copy a trained `point_cloud.ply` or `model.splat` locally, or drop a file in the viewer. `gaussian_splatting_webgpu/demo.ply` is a tiny SH0 sphere.
 
 Serve the repo from the **repository root** (the WebGPU worker imports `../shared/splat-io.js`, so `file://` and serving only the subfolder will fail):
 
@@ -25,7 +25,7 @@ cd Gaussian-Splatting-WebViewers
 python3 -m http.server 8090 --bind 127.0.0.1
 ```
 
-Then open [http://127.0.0.1:8090/](http://127.0.0.1:8090/) or the WebGPU viewer at [http://127.0.0.1:8090/gaussian_splatting_webgpu/?url=../splats/model.splat](http://127.0.0.1:8090/gaussian_splatting_webgpu/?url=../splats/model.splat). Default scene is `splats/model.splat`. Pipeline notes: [docs/pipeline.md](docs/pipeline.md). Roadmap for per-Gaussian segmentation, classification, mesh and object editing: [docs/plan-segmentacion-edicion-3dgs.md](docs/plan-segmentacion-edicion-3dgs.md). Paper (flowchart, references, attributions): [docs/open-vocab-3dgs-imagine-pipeline-paper.md](docs/open-vocab-3dgs-imagine-pipeline-paper.md) · [PDF](docs/open-vocab-3dgs-imagine-pipeline-paper.pdf).
+Then open [http://127.0.0.1:8090/](http://127.0.0.1:8090/) or the WebGPU viewer at [http://127.0.0.1:8090/gaussian_splatting_webgpu/?url=../splats/alarm_clock_generated.splat](http://127.0.0.1:8090/gaussian_splatting_webgpu/?url=../splats/alarm_clock_generated.splat). Default scene is `splats/alarm_clock_generated.splat`. Pipeline notes: [docs/pipeline.md](docs/pipeline.md). Roadmap for per-Gaussian segmentation, classification, mesh and object editing: [docs/plan-segmentacion-edicion-3dgs.md](docs/plan-segmentacion-edicion-3dgs.md). Paper (flowchart, references, attributions): [docs/open-vocab-3dgs-imagine-pipeline-paper.md](docs/open-vocab-3dgs-imagine-pipeline-paper.md) · [PDF](docs/open-vocab-3dgs-imagine-pipeline-paper.pdf).
 
 ### WebGPU Chrome (Linux / Vulkan)
 
@@ -44,7 +44,7 @@ google-chrome \
   --enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE \
   --use-angle=vulkan \
   --new-window \
-  'http://127.0.0.1:8090/gaussian_splatting_webgpu/?url=../splats/model.splat'
+  'http://127.0.0.1:8090/gaussian_splatting_webgpu/?url=../splats/alarm_clock_generated.splat'
 ```
 
 Or:

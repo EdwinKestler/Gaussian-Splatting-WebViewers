@@ -119,12 +119,13 @@ ok "splats/  img_output/  artifacts/"
 if [[ -f gaussian_splatting_webgpu/demo.ply ]]; then
   ok "demo scene: gaussian_splatting_webgpu/demo.ply"
 fi
-if [[ -f splats/model.splat ]]; then
-  ok "default scene: splats/model.splat"
+if [[ -f splats/alarm_clock_generated.splat ]]; then
+  ok "default scene: splats/alarm_clock_generated.splat"
 else
-  warn "splats/ is gitignored and empty here. Copy a .splat or point_cloud.ply:"
-  echo "         mkdir -p splats && cp /path/to/model.splat splats/model.splat"
-  echo "         (viewer still loads demo.ply via the Demo PLY button)"
+  warn "missing shipped demo splats/alarm_clock_generated.splat"
+fi
+if [[ -f splats/model.splat ]]; then
+  ok "optional local scene: splats/model.splat"
 fi
 
 echo "==> env"
@@ -191,7 +192,7 @@ echo "  ./semantic_sidecar/launch.sh                 # optional, needs XAI_API_K
 echo "  ./gaussian_splatting_webgpu/launch-webgpu-chrome.sh"
 echo
 echo "  Viewer:  http://127.0.0.1:8090/gaussian_splatting_webgpu/"
-echo "  Demo:    http://127.0.0.1:8090/gaussian_splatting_webgpu/?url=./demo.ply"
+echo "  Demo:    http://127.0.0.1:8090/gaussian_splatting_webgpu/?url=../splats/alarm_clock_generated.splat"
 echo "  Notes:   docs/pipeline.md   docs/webgpu-chrome.md"
 if [[ "${WITH_TESTS}" -eq 1 ]]; then
   echo "  Tests:   npm test"

@@ -4,7 +4,7 @@ Full paper (description, flowchart, references, attributions):
 [open-vocab-3dgs-imagine-pipeline-paper.md](open-vocab-3dgs-imagine-pipeline-paper.md) ·
 [PDF](open-vocab-3dgs-imagine-pipeline-paper.pdf)
 
-Default WebGPU scene: `splats/model.splat` (compact 32-byte SH0). Serve from the **repo root**.
+Default WebGPU scene: `splats/alarm_clock_generated.splat` (compact 32-byte SH0, shipped). Serve from the **repo root**.
 
 ```bash
 ./setup.sh                            # once per machine
@@ -14,7 +14,7 @@ python3 -m http.server 8090 --bind 127.0.0.1
 ```
 
 ```
-splats/model.splat
+splats/alarm_clock_generated.splat
         │  HTTP 8090  (or drop a trained point_cloud.ply)
         ▼
 ┌─────────────────────────────────────────────────────────┐
