@@ -108,6 +108,11 @@
     },
     {
       "mode": "search",
+      "query": "BrowserSam BrowserClip transformers.js localModelPath labelMask embedImage",
+      "expected_paths": ["gaussian_splatting_webgpu/ml-browser.js"]
+    },
+    {
+      "mode": "search",
       "query": "instanceBounds frameBounds searchInstances applyNames nombre_es categoria",
       "expected_paths": ["shared/naming.js"]
     }

@@ -49,6 +49,7 @@ extremo (IoU > 0,9) y el esquema de `instancias.json`.
 | Fichero | Cubre |
 | --- | --- |
 | `tests/e2e/smoke.spec.mjs` | Adaptador WebGPU, `splat-io` en el navegador, cómputo + render *offscreen* bajo SwiftShader, `parse-worker.js` con GaussForge vendorizado y el CDN bloqueado (criterio F0 «carga sin red») |
+| `tests/e2e/f4-ml-browser.spec.mjs` | *Opcional* (`ML_E2E=1` + `scripts/download-ml-models.sh`): SAM 2.1 en el navegador (transformers.js, WASM) levanta las dos esferas en exactamente 2 instancias desde indicaciones de superpuntos, CLIP incrusta los recortes aislados y «an orange ball» / «a blue sphere» eligen la esfera correcta, la exportación lleva `embedding_clip` unitario de 512 d. ≈ 1 min bajo SwiftShader |
 | `tests/e2e/f4-naming.spec.mjs` | Aceptación F4 con el sidecar simulado por `page.route` (sin clave): recorte aislado por instancia (sólo sus gaussianas, fondo blanco, cámara restaurada), `/name` → nombre_es/categoría/confianza en el panel, búsqueda con acentos y selección con Intro, exportación con nombres, tarjeta Imagine ligada a `id_instancia`, error claro sin sidecar |
 | `tests/e2e/f3-lift.spec.mjs` | Aceptación F3: el pase K-buffer da contribuciones exactas (0 gaussianas mal asignadas desde una vista) y la profundidad mediana analítica; 6 vistas con ids permutados → 2 instancias con IoU 3D > 0,9 tras asociación por superpuntos y difusión; el visor levanta con la fuente «prueba» y exporta `instancias.json` |
 | `tests/e2e/f2-groups.spec.mjs` | Aceptación F2: el grafo del worker separa las dos esferas en exactamente 2 grupos, la vista «Grupos» las colorea distinto (lectura *offscreen*), un clic con la vista activa convierte el grupo en instancia y `Difundir etiquetas` respeta las etiquetas limpias |
@@ -57,6 +58,7 @@ extremo (IoU > 0,9) y el esquema de `instancias.json`.
 
 ```bash
 npm run test:e2e                # npx playwright test
+ML_E2E=1 npx playwright test tests/e2e/f4-ml-browser.spec.mjs   # modelos en el navegador (pesos en vendor/ml/)
 npx playwright test --headed    # ver el navegador (requiere pantalla)
 npx playwright test -g "adapter"   # filtrar por título
 ```

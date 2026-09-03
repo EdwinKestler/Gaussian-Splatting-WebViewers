@@ -283,8 +283,10 @@
         <button id="inst-show-all" type="button">Mostrar todo</button>
       </div>
       <input id="inst-search" type="text" placeholder="Buscar instancia (nombre, categoría)… Intro selecciona" autocomplete="off" />
+      <div class="check"><input id="inst-semantic" type="checkbox" /> Búsqueda semántica (CLIP en el navegador)</div>
       <div class="btns">
         <button id="inst-name" type="button">Nombrar instancias (Grok)</button>
+        <button id="inst-embed" type="button">Embeddings CLIP</button>
       </div>
       <div id="inst-status">Seleccionada: ninguna</div>
       <div id="inst-name-status" class="inst-hint"></div>
@@ -313,6 +315,7 @@
           <option value="prueba">Etiquetas actuales (prueba)</option>
           <option value="sidecar-cajas">Sidecar: cajas de Grok</option>
           <option value="sidecar-sam">Sidecar: SAM</option>
+          <option value="sam2">SAM 2 (navegador, transformers.js)</option>
         </select>
         <span></span>
       </label>

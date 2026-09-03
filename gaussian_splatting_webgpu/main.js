@@ -853,6 +853,8 @@ async function main() {
   };
   /** Last lift: labels applied, names, per-view metadata (for instancias.json). */
   const seg = { last: null, running: false };
+  /** In-browser models (ml-browser.js), loaded on demand. */
+  const ml = { module: null, sam: null, clip: null, samPrompts: 12 };
   const SEG_K = 24;
   const SEG_MAX_EDGE = 512;
   const SEG_PITCH = 0.45;
@@ -970,6 +972,90 @@ async function main() {
     return out;
   }
 
+  async function loadMl() {
+    if (!ml.module) ml.module = await import("./ml-browser.js");
+    return ml.module;
+  }
+
+  async function loadBrowserSam() {
+    if (ml.sam) return ml.sam;
+    const mod = await loadMl();
+    setSegStatus("Cargando SAM 2 (transformers.js)…");
+    ml.sam = await mod.BrowserSam.load({
+      progress: (p) => {
+        if (p.status === "progress" && p.file) setSegStatus(`Cargando SAM 2: ${p.file} ${Math.round(p.progress || 0)} %`);
+      },
+    });
+    console.info(`[ml] SAM listo: ${ml.sam.meta.id} · ${ml.sam.meta.device} · ${ml.sam.meta.dtype}`);
+    return ml.sam;
+  }
+
+  async function loadBrowserClip() {
+    if (ml.clip) return ml.clip;
+    const mod = await loadMl();
+    setNameStatus("Cargando CLIP (transformers.js)…");
+    ml.clip = await mod.BrowserClip.load({
+      progress: (p) => {
+        if (p.status === "progress" && p.file) setNameStatus(`Cargando CLIP: ${p.file} ${Math.round(p.progress || 0)} %`);
+      },
+    });
+    console.info(`[ml] CLIP listo: ${ml.clip.meta.id} · ${ml.clip.meta.device} · ${ml.clip.meta.dtype}`);
+    return ml.clip;
+  }
+
+  /** Project a world point with the renderer's current camera to pixel coords of a W×H target. */
+  function projectToTarget(p, W, H) {
+    const cam = renderer.camera;
+    const v = transformVec4(cam.view, [p[0], p[1], p[2], 1]);
+    const c = transformVec4(cam.projection, v);
+    if (c[3] <= 0) return null;
+    const x = (c[0] / c[3] * 0.5 + 0.5) * W;
+    const y = (1 - (c[1] / c[3] * 0.5 + 0.5)) * H;
+    if (x < 0 || y < 0 || x >= W || y >= H) return null;
+    return [x, y];
+  }
+
+  /**
+   * Point prompts for SAM from the F2 superpoints: the largest superpoints
+   * whose centroid projects inside the view and is actually visible there
+   * (the ID pass hits a gaussian of that superpoint at the pixel).
+   */
+  async function samPromptsForView(W, H, maxPrompts) {
+    const g = groups.result;
+    if (!g) throw new Error("SAM en el navegador necesita los superpuntos (F2)");
+    const id = await renderer.renderOffscreen({ mode: OUTPUT_MODE.ID, width: W, height: H });
+    const prompts = [];
+    const order = [...g.sizes.keys()].sort((a, b) => g.sizes[b] - g.sizes[a]);
+    for (const sp of order) {
+      if (prompts.length >= maxPrompts) break;
+      if (g.sizes[sp] < 20) break;
+      const c = [g.centroids[sp * 3], g.centroids[sp * 3 + 1], g.centroids[sp * 3 + 2]];
+      const px = projectToTarget(c, W, H);
+      if (!px) continue;
+      const hit = id.data[Math.floor(px[1]) * W + Math.floor(px[0])];
+      if (!hit || g.superpoint[hit - 1] !== sp) continue;
+      prompts.push({ points: [[px[0], px[1]]], superpoint: sp });
+    }
+    return prompts;
+  }
+
+  /** Capture n orbit views and segment each one with SAM 2 in the browser. */
+  async function masksFromBrowserSam(n, W, H, saved, maxPrompts) {
+    const sam = await loadBrowserSam();
+    const out = [];
+    for (let v = 0; v < n; v++) {
+      applyOrbitView(v, n, saved);
+      const prompts = await samPromptsForView(W, H, maxPrompts);
+      setSegStatus(`SAM 2 vista ${v + 1}/${n}: codificando ${W}×${H} (${prompts.length} indicaciones)…`);
+      const col = await renderer.renderOffscreen({ mode: OUTPUT_MODE.COLOR, width: W, height: H, clearColor: [0, 0, 0, 1] });
+      const msEncode = await sam.setImage(col.data, W, H);
+      const lm = await sam.labelMask(prompts);
+      console.info(`[ml] SAM vista ${v + 1}: ${lm.objects.length} máscaras de ${prompts.length} indicaciones (${lm.duplicates} duplicadas) · codificación ${msEncode.toFixed(0)} ms`);
+      out.push({ mask: lm.labels, labelCount: lm.labelCount, names: [], sam: { prompts: prompts.length, duplicates: lm.duplicates, objects: lm.objects, msEncode } });
+    }
+    return out;
+  }
+
   /**
    * Lift 2D masks from n orbit views to per-gaussian instance labels:
    * K-buffer contributions → FlashSplat → superpoint association → diffusion.
@@ -997,7 +1083,9 @@ async function main() {
       }
       const [W, H] = maskSize();
       let sidecarMasks = null;
-      if (source !== "prueba") {
+      if (source === "sam2") {
+        sidecarMasks = await masksFromBrowserSam(n, W, H, saved, options.samPrompts || ml.samPrompts);
+      } else if (source !== "prueba") {
         sidecarMasks = await masksFromSidecar(n, W, H, saved, source === "sidecar-sam" ? "sam" : "grok-boxes");
       }
       const views = [];
@@ -1008,7 +1096,7 @@ async function main() {
         setSegStatus(`Levantando vista ${v + 1}/${n} (${m.labelCount - 1} máscaras, ${W}×${H})…`);
         const c = await renderer.renderContributions({ mask: m.mask, width: W, height: H, labelCount: m.labelCount, k: SEG_K });
         views.push({ contrib: c.contrib, labelCount: m.labelCount, names: m.names || [] });
-        viewMeta.push({ indice: v, yaw: camera.yaw, pitch: camera.pitch, eye: camera.eye(), mascaras: m.labelCount - 1, chunks: c.chunks, splits: c.splits, instancias: [] });
+        viewMeta.push({ indice: v, yaw: camera.yaw, pitch: camera.pitch, eye: camera.eye(), mascaras: m.labelCount - 1, chunks: c.chunks, splits: c.splits, instancias: [], sam: m.sam || null });
       }
       setSegStatus("Asignando etiquetas (FlashSplat) y asociando vistas…");
       const lift = liftViews(views, { count: cloud.count, superpoint: groups.result.superpoint, backgroundBias: bias });
@@ -1083,6 +1171,7 @@ async function main() {
       names,
       colors,
       views: l.views.map((v) => ({ indice: v.indice, instancias: v.instancias })),
+      embeddings: embeddings.vectors.size ? { vectors: Object.fromEntries(embeddings.vectors), modelo: embeddings.modelo, dimension: embeddings.dimension } : null,
     });
     return { json, bytes: labelsToBytes(labels) };
   }
@@ -1167,7 +1256,7 @@ async function main() {
     try {
       const col = await renderer.renderOffscreen({ mode: OUTPUT_MODE.COLOR, width: W, height: H, clearColor: [1, 1, 1, 1] });
       const png = await rgbaToPngB64(col.data, W, H);
-      naming.crops.set(label, { png, width: W, height: H, bounds });
+      naming.crops.set(label, { png, rgba: col.data, width: W, height: H, bounds });
       return png;
     } finally {
       renderer.setParams({ isolateLabel: saved.isolate });
@@ -1259,6 +1348,61 @@ async function main() {
     }
   }
 
+  // ---- CLIP embeddings per instance (F4 optional) and semantic search
+  const embeddings = { vectors: new Map(), modelo: "", dimension: 0 };
+
+  async function embedInstances({ labels: only = null } = {}) {
+    const targets = only || [...panel.entries.keys()];
+    if (!targets.length) throw new Error("no hay instancias que incrustar");
+    const clip = await loadBrowserClip();
+    freezeFrame = true;
+    const t0 = performance.now();
+    try {
+      let done = 0;
+      for (const label of targets) {
+        if (!panel.entries.has(label)) continue;
+        setNameStatus(`CLIP: instancia ${label} (${done + 1}/${targets.length})…`);
+        let crop = naming.crops.get(label);
+        if (!crop || !crop.rgba) {
+          await renderInstanceCrop(label);
+          crop = naming.crops.get(label);
+        }
+        embeddings.vectors.set(label, await clip.embedImage(crop.rgba, crop.width, crop.height));
+        done++;
+      }
+      embeddings.modelo = clip.meta.id;
+      embeddings.dimension = embeddings.vectors.values().next().value?.length || 0;
+      const ms = performance.now() - t0;
+      setNameStatus(`${done} embeddings CLIP (${embeddings.dimension} d) · ${clip.meta.device} · ${ms.toFixed(0)} ms`, "ok");
+      return { count: done, dimension: embeddings.dimension, modelo: embeddings.modelo, ms };
+    } catch (err) {
+      setNameStatus(`Embeddings fallidos: ${err.message}`, "err");
+      throw err;
+    } finally {
+      freezeFrame = false;
+    }
+  }
+
+  /** Rank instances by CLIP similarity to a text query; highlights and optionally selects the best. */
+  async function searchSemantic(query, select = true) {
+    const q = String(query || "").trim();
+    if (!q) return [];
+    if (!embeddings.vectors.size) await embedInstances();
+    const clip = await loadBrowserClip();
+    const t = await clip.embedText(q);
+    const Clip = (await loadMl()).BrowserClip;
+    const ranked = [...embeddings.vectors.entries()]
+      .map(([label, v]) => ({ label, score: Clip.cosine(v, t) }))
+      .sort((a, b) => b.score - a.score);
+    panel.matches = new Set(ranked.slice(0, Math.max(1, Math.ceil(ranked.length / 3))).map((r) => r.label));
+    panel.renderList();
+    if (select && ranked.length) panel.select(ranked[0].label);
+    setNameStatus(`Semántica «${q}»: ${ranked.slice(0, 3).map((r) => `#${r.label} ${r.score.toFixed(3)}`).join(" · ")}`, "ok");
+    return ranked;
+  }
+
+  $("inst-embed").addEventListener("click", () => embedInstances().catch(() => {}));
+
   panel.onAction = (act, label) => {
     if (act === "name") nameInstances({ labels: [label] }).catch(() => {});
     else if (act === "card") cardForInstance(label).catch(() => {});
@@ -1267,6 +1411,10 @@ async function main() {
   nameEl.search.addEventListener("input", () => panel.search(nameEl.search.value));
   nameEl.search.addEventListener("keydown", (e) => {
     if (e.key !== "Enter") return;
+    if ($("inst-semantic").checked) {
+      searchSemantic(nameEl.search.value).catch(() => {});
+      return;
+    }
     const found = panel.search(nameEl.search.value);
     if (found.length) panel.select(found[0].label);
     else if (nameEl.search.value.trim()) panel.setStatus(`Sin resultados para «${nameEl.search.value.trim()}»`);
@@ -1282,6 +1430,9 @@ async function main() {
       return found;
     },
     entries: () => panel.rows(),
+    embed: (options) => embedInstances(options),
+    searchSemantic: (query, select = true) => searchSemantic(query, select),
+    embeddings: () => ({ modelo: embeddings.modelo, dimension: embeddings.dimension, labels: [...embeddings.vectors.keys()] }),
   };
 
   worker.onmessage = (e) => {

@@ -50,8 +50,8 @@ Later / optional (not in the sidecar today)
 | 2 Rasterize | Paper 3DGS ellipses | This WebGPU viewer |
 | 2b Identity (F1) | Label per Gaussian, instance table, ID / depth / normal readback, `pick()` | `gpu-renderer.js`, HUD *Instancias* |
 | 2c Superpoints (F2) | kNN + Mahalanobis/colour weights → connected components; group → instance on click; label diffusion | `shared/graph.js` in `graph-worker.js`, HUD *Grupos* |
-| 2d Lift (F3) | K-buffer α·T per mask label → FlashSplat argmax → association over superpoints → diffusion → `instancias.json` + `etiquetas.u32` | `contrib-pass.js`, `shared/lift.js`, HUD *Segmentación*; masks from the current labels (test), sidecar `/segment` (Grok boxes → ellipse masks, or a SAM backend via `SAM_BACKEND`) |
-| 2e Name (F4) | Isolated render per instance → sidecar `/name` (Grok VQA, JSON `nombre`/`nombre_es`/`categoria`/`confianza`; `NAME_BACKEND=mock` for tests) → panel + search + Imagine card per `id_instancia` | `shared/naming.js`, HUD *Instancias* |
+| 2d Lift (F3) | K-buffer α·T per mask label → FlashSplat argmax → association over superpoints → diffusion → `instancias.json` + `etiquetas.u32` | `contrib-pass.js`, `shared/lift.js`, HUD *Segmentación*; masks from the current labels (test), sidecar `/segment` (Grok boxes → ellipse masks, or a SAM backend via `SAM_BACKEND`), or SAM 2 in the browser (`ml-browser.js`, prompts = projected superpoint centroids) |
+| 2e Name (F4) | Isolated render per instance → sidecar `/name` (Grok VQA, JSON `nombre`/`nombre_es`/`categoria`/`confianza`; `NAME_BACKEND=mock` for tests) → panel + search + Imagine card per `id_instancia`; optional CLIP ViT-B/32 embeddings per crop in the browser → semantic search + `embedding_clip` in the export | `shared/naming.js`, `ml-browser.js`, HUD *Instancias* |
 | 3 Capture | PNG + yaw/pitch/eye | `canvas` snapshot |
 | 4 Tag | Open-vocab names + boxes | `grok-4.6` vision |
 | 5 Cluster | Merge armchair/sofa/seat | name key in sidecar |

@@ -286,7 +286,7 @@ const GAUSSIAN_FLOATS = 12;
  * instancias.json (plan §3.3). Gaussian index is the invariant id; labels are
  * serialised separately as etiquetas.u32 (see labelsToBytes).
  */
-export function buildInstancesJson({ escena, fecha, fuente, metodo, labels, gaussians = null, names = [], colors = [], views = [] }) {
+export function buildInstancesJson({ escena, fecha, fuente, metodo, labels, gaussians = null, names = [], colors = [], views = [], embeddings = null }) {
   if (!(labels instanceof Uint32Array)) throw new Error("labels must be a Uint32Array");
   if (gaussians && gaussians.length !== labels.length * GAUSSIAN_FLOATS) {
     throw new Error("gaussians must have 12 floats per label");
@@ -321,6 +321,9 @@ export function buildInstancesJson({ escena, fecha, fuente, metodo, labels, gaus
     bbox: gaussians ? { min: min.get(l), max: max.get(l) } : null,
     color: colors[l] || null,
     vistas: views.filter((v) => v.instancias && v.instancias.includes(l)).map((v) => v.indice),
+    embedding_clip: embeddings && embeddings.vectors && embeddings.vectors[l]
+      ? Array.from(embeddings.vectors[l], (v) => Math.round(v * 1e4) / 1e4)
+      : null,
   }));
   return {
     version: 1,
@@ -337,6 +340,7 @@ export function buildInstancesJson({ escena, fecha, fuente, metodo, labels, gaus
       k_buffer: metodo.k_buffer ?? null,
     },
     n_instancias: instancias.length,
+    embeddings: embeddings ? { modelo: embeddings.modelo || "", dimension: embeddings.dimension || 0 } : null,
     instancias,
   };
 }

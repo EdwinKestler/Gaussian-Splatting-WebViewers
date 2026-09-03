@@ -238,13 +238,32 @@ describe("export schema", () => {
       bbox: { min: [1, 0, 0], max: [2, 0, 0] },
       color: [1, 0, 0],
       vistas: [0, 1],
+      embedding_clip: null,
     });
     assert.equal(json.instancias[1].nombre_es, "objeto 2");
     assert.deepEqual(json.instancias[1].vistas, [0]);
+    assert.equal(json.embeddings, null, "sin CLIP no hay bloque de embeddings");
+    assert.equal(json.instancias[0].embedding_clip, null);
     const bytes = labelsToBytes(labels);
     assert.equal(bytes.length, 20);
     assert.deepEqual(Array.from(labelsFromBytes(bytes)), Array.from(labels));
     assert.throws(() => labelsFromBytes(new Uint8Array(3)), /multiple of 4/);
+  });
+
+  test("buildInstancesJson carries CLIP embeddings per instance (F4 optional)", () => {
+    const labels = new Uint32Array([1, 1, 2]);
+    const json = buildInstancesJson({
+      escena: "s.splat",
+      fecha: "2026-09-03T00:00:00Z",
+      fuente: { formato: "splat", sh_grado: 0 },
+      metodo: { mascaras: "sam2-navegador" },
+      labels,
+      embeddings: { modelo: "Xenova/clip-vit-base-patch32", dimension: 3, vectors: { 1: new Float32Array([0.123456, -0.5, 0.86]) } },
+    });
+    assert.deepEqual(json.embeddings, { modelo: "Xenova/clip-vit-base-patch32", dimension: 3 });
+    assert.deepEqual(json.instancias[0].embedding_clip, [0.1235, -0.5, 0.86], "redondeado a 1e-4 y como array JSON");
+    assert.equal(json.instancias[1].embedding_clip, null, "instancia sin embedding");
+    assert.equal(json.metodo.mascaras, "sam2-navegador");
   });
 
   test("labelIou and matchLabels", () => {
